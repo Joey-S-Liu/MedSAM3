@@ -39,6 +39,22 @@ W' = W_frozen + B×A  (where rank << model_dim)
 
 ## Installation
 
+### Prerequisites
+
+Before installing, you need to:
+
+1. **Request SAM3 Access on Hugging Face**
+   - Go to [facebook/sam3 on Hugging Face](https://huggingface.co/facebook/sam3)
+   - Click "Request Access" and accept the license terms
+   - Wait for approval (usually instant to a few hours)
+
+2. **Get Your Hugging Face Token**
+   - Go to [Hugging Face Settings > Tokens](https://huggingface.co/settings/tokens)
+   - Create a new token or use existing one
+   - Copy the token (you'll need it in the next step)
+
+### Install
+
 ```bash
 # Clone repository
 git clone https://github.com/yourusername/sam3_lora.git
@@ -46,13 +62,39 @@ cd sam3_lora
 
 # Install dependencies
 pip install -e .
+
+# Login to Hugging Face
+huggingface-cli login
+# Paste your token when prompted
 ```
 
-**Requirements**: Python 3.8+, PyTorch 2.0+, CUDA (optional)
+**Alternative login method:**
+```bash
+# Or set token as environment variable
+export HF_TOKEN="your_token_here"
+```
+
+**Requirements**: Python 3.8+, PyTorch 2.0+, CUDA (optional), Hugging Face account with SAM3 access
+
+### Verification
+
+Verify your setup is complete:
+
+```bash
+# Test Hugging Face login
+huggingface-cli whoami
+
+# Test SAM3 access (should not give access error)
+python3 -c "from transformers import AutoModel; print('✓ SAM3 accessible')"
+```
+
+If you see errors, review the [Troubleshooting](#troubleshooting) section.
 
 ---
 
 ## Quick Start
+
+> **⚠️ Important**: Make sure you've completed the [Installation](#installation) steps, including Hugging Face login, before proceeding.
 
 ### 1. Prepare Your Data
 
@@ -512,13 +554,23 @@ sam3_lora/
 
 ### Common Issues
 
-**1. Import Errors**
+**1. Hugging Face Authentication Error**
+```
+Error: Access denied to facebook/sam3
+```
+**Solution:**
+- Make sure you've requested access at https://huggingface.co/facebook/sam3
+- Wait for approval (check your email)
+- Run `huggingface-cli login` and paste your token
+- Or set: `export HF_TOKEN="your_token"`
+
+**2. Import Errors**
 ```bash
 # Make sure package is installed
 pip install -e .
 ```
 
-**2. CUDA Out of Memory**
+**3. CUDA Out of Memory**
 ```yaml
 # Reduce batch size and rank in config
 training:
@@ -528,19 +580,19 @@ lora:
   rank: 4
 ```
 
-**3. Very Low Loss (< 0.001)**
+**4. Very Low Loss (< 0.001)**
 - Model may be overfitting
 - Reduce LoRA rank
 - Add more dropout
 - Check if base model is properly frozen
 
-**4. Loss Not Decreasing**
+**5. Loss Not Decreasing**
 - Increase learning rate
 - Increase LoRA rank
 - Train for more epochs
 - Check data quality
 
-**5. Wrong Number of Trainable Parameters**
+**6. Wrong Number of Trainable Parameters**
 ```
 Expected: ~0.5-2% (for rank 4-16)
 If you see 63%: Base model not frozen (bug fixed in latest version)
