@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 from sam3.model_builder import build_sam3_image_model
 from sam3.train.loss.loss_fns import IABCEMdetr, Boxes, Masks, CORE_LOSS_KEY
 from sam3.train.loss.sam3_loss import Sam3LossWrapper
-from sam3.train.matcher import BinaryHungarianMatcherV2
+from sam3.train.matcher import BinaryHungarianMatcherV2, BinaryOneToManyMatcher
 from sam3.train.data.collator import collate_fn_api
 from sam3.train.data.sam3_image_dataset import Datapoint, Image, Object, FindQueryLoaded, InferenceMetadata
 from sam3.model.box_ops import box_xywh_to_xyxy
@@ -80,12 +80,15 @@ class SimpleSAM3Dataset(Dataset):
             # Convert from COCO [x, y, w, h] to [x1, y1, x2, y2]
             x, y, w, h = bbox_coco
             box_tensor = torch.tensor([x, y, x + w, y + h], dtype=torch.float32)
-            
-            # Scale box
+
+            # Scale box to resolution
             box_tensor[0] *= scale_w
             box_tensor[2] *= scale_w
             box_tensor[1] *= scale_h
             box_tensor[3] *= scale_h
+
+            # IMPORTANT: Normalize boxes to [0, 1] range (required by SAM3 loss functions)
+            box_tensor /= self.resolution
 
             # Handle segmentation mask (RLE encoded)
             segment = None
@@ -234,10 +237,20 @@ class SAM3TrainerNative:
             )
         ]
 
+        # Create one-to-many matcher for auxiliary outputs
+        o2m_matcher = BinaryOneToManyMatcher(
+            alpha=0.3,
+            threshold=0.4,
+            topk=4
+        )
+
         # Use Sam3LossWrapper for proper loss computation
         self.loss_wrapper = Sam3LossWrapper(
             loss_fns_find=loss_fns,
             matcher=self.matcher,
+            o2m_matcher=o2m_matcher,
+            o2m_weight=2.0,
+            use_o2m_matcher_on_o2m_aux=False,
             normalization="local",  # Use local normalization (no distributed training)
             normalize_by_valid_object_num=False,
         )
