@@ -204,7 +204,14 @@ class SAM3TrainerNative:
         
     def train(self):
         train_ds = SimpleSAM3Dataset("data", image_set="train")
-        val_ds = SimpleSAM3Dataset("data", image_set="valid")
+
+        # Check if validation data exists
+        try:
+            val_ds = SimpleSAM3Dataset("data", image_set="valid")
+            has_validation = len(val_ds) > 0
+        except:
+            val_ds = None
+            has_validation = False
 
         def collate_fn(batch):
             return collate_fn_api(batch, dict_key="input", with_seg_masks=True)
@@ -217,16 +224,19 @@ class SAM3TrainerNative:
             num_workers=0 # Simplified
         )
 
-        val_loader = DataLoader(
-            val_ds,
-            batch_size=self.config["training"]["batch_size"],
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=0
-        )
+        if has_validation:
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=self.config["training"]["batch_size"],
+                shuffle=False,
+                collate_fn=collate_fn,
+                num_workers=0
+            )
+        else:
+            val_loader = None
 
         self.model.train()
-        
+
         # Weights from a standard SAM config roughly
         weight_dict = {
             "loss_ce": 2.0,
@@ -235,11 +245,16 @@ class SAM3TrainerNative:
             "loss_mask": 5.0,
             "loss_dice": 5.0
         }
-        
+
         epochs = self.config["training"]["num_epochs"]
         best_val_loss = float('inf')
         print(f"Starting training for {epochs} epochs...")
-        print(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
+
+        if has_validation:
+            print(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
+        else:
+            print(f"Training samples: {len(train_ds)}")
+            print("⚠️  No validation data found - training without validation")
 
         # Helper to move BatchedDatapoint to device
         def move_to_device(obj, device):
@@ -319,71 +334,95 @@ class SAM3TrainerNative:
                 
                 pbar.set_postfix({"loss": total_loss.item()})
 
-            # Validation
-            self.model.eval()
-            val_losses = []
+            # Validation (only if validation data exists)
+            if has_validation and val_loader is not None:
+                self.model.eval()
+                val_losses = []
 
-            with torch.no_grad():
-                val_pbar = tqdm(val_loader, desc=f"Validation")
-                for batch_dict in val_pbar:
-                    input_batch = batch_dict["input"]
-                    input_batch = move_to_device(input_batch, self.device)
+                with torch.no_grad():
+                    val_pbar = tqdm(val_loader, desc=f"Validation")
+                    for batch_dict in val_pbar:
+                        input_batch = batch_dict["input"]
+                        input_batch = move_to_device(input_batch, self.device)
 
-                    # Forward
-                    outputs_list = self.model(input_batch)
-                    outputs = outputs_list[-1]
+                        # Forward
+                        outputs_list = self.model(input_batch)
+                        outputs = outputs_list[-1]
 
-                    # Prepare targets
-                    targets_raw = input_batch.find_targets[0]
-                    targets = self.model.back_convert(targets_raw)
+                        # Prepare targets
+                        targets_raw = input_batch.find_targets[0]
+                        targets = self.model.back_convert(targets_raw)
 
-                    for k, v in targets.items():
-                        if isinstance(v, torch.Tensor):
-                            targets[k] = v.to(self.device)
+                        for k, v in targets.items():
+                            if isinstance(v, torch.Tensor):
+                                targets[k] = v.to(self.device)
 
-                    # Compute losses
-                    indices = self.matcher(outputs, targets)
-                    losses = {}
+                        # Compute losses
+                        indices = self.matcher(outputs, targets)
+                        losses = {}
 
-                    l_cls = self.criterion_cls.get_loss(outputs, targets, indices, num_boxes=1)
-                    l_box = self.criterion_box.get_loss(outputs, targets, indices, num_boxes=1)
-                    l_mask = self.criterion_mask.get_loss(outputs, targets, indices, num_boxes=1)
+                        l_cls = self.criterion_cls.get_loss(outputs, targets, indices, num_boxes=1)
+                        l_box = self.criterion_box.get_loss(outputs, targets, indices, num_boxes=1)
+                        l_mask = self.criterion_mask.get_loss(outputs, targets, indices, num_boxes=1)
 
-                    losses.update(l_cls)
-                    losses.update(l_box)
-                    losses.update(l_mask)
+                        losses.update(l_cls)
+                        losses.update(l_box)
+                        losses.update(l_mask)
 
-                    total_loss = 0
-                    for k, v in losses.items():
-                        if k in weight_dict:
-                            total_loss += v * weight_dict[k]
+                        total_loss = 0
+                        for k, v in losses.items():
+                            if k in weight_dict:
+                                total_loss += v * weight_dict[k]
 
-                    val_losses.append(total_loss.item())
-                    val_pbar.set_postfix({"val_loss": total_loss.item()})
+                        val_losses.append(total_loss.item())
+                        val_pbar.set_postfix({"val_loss": total_loss.item()})
 
-            avg_val_loss = sum(val_losses) / len(val_losses)
-            print(f"Epoch {epoch+1}/{epochs} - Validation Loss: {avg_val_loss:.6f}")
+                avg_val_loss = sum(val_losses) / len(val_losses)
+                print(f"Epoch {epoch+1}/{epochs} - Validation Loss: {avg_val_loss:.6f}")
 
-            # Save best model
-            out_dir = Path(self.config["output"]["output_dir"])
-            out_dir.mkdir(parents=True, exist_ok=True)
+                # Save best model
+                out_dir = Path(self.config["output"]["output_dir"])
+                out_dir.mkdir(parents=True, exist_ok=True)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                save_lora_weights(self.model, str(out_dir / "best_lora_weights.pt"))
-                print(f"✓ Saved best model (val_loss: {avg_val_loss:.6f})")
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    save_lora_weights(self.model, str(out_dir / "best_lora_weights.pt"))
+                    print(f"✓ Saved best model (val_loss: {avg_val_loss:.6f})")
 
-            # Save latest model
-            save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
+                # Save latest model
+                save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
 
-            # Back to training mode
-            self.model.train()
+                # Back to training mode
+                self.model.train()
+            else:
+                # No validation - just save model each epoch
+                out_dir = Path(self.config["output"]["output_dir"])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
 
-        print(f"\n✅ Training complete!")
-        print(f"Best validation loss: {best_val_loss:.6f}")
-        print(f"Models saved to {out_dir}:")
-        print(f"  - best_lora_weights.pt (best validation)")
-        print(f"  - last_lora_weights.pt (last epoch)")
+        # Final save
+        out_dir = Path(self.config["output"]["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if has_validation:
+            print(f"\n✅ Training complete!")
+            print(f"Best validation loss: {best_val_loss:.6f}")
+            print(f"Models saved to {out_dir}:")
+            print(f"  - best_lora_weights.pt (best validation)")
+            print(f"  - last_lora_weights.pt (last epoch)")
+        else:
+            # If no validation, copy last to best
+            import shutil
+            last_path = out_dir / "last_lora_weights.pt"
+            best_path = out_dir / "best_lora_weights.pt"
+            if last_path.exists():
+                shutil.copy(last_path, best_path)
+
+            print(f"\n✅ Training complete!")
+            print(f"Models saved to {out_dir}:")
+            print(f"  - best_lora_weights.pt (copy of last epoch)")
+            print(f"  - last_lora_weights.pt (last epoch)")
+            print(f"\nℹ️  No validation data - consider adding data/valid/ for better model selection")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train SAM3 with LoRA")
