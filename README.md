@@ -102,17 +102,19 @@ Organize your dataset with images and annotations:
 
 ```
 data/
-├── train/
+├── train/                    # Required
 │   ├── images/
 │   │   ├── img001.jpg
 │   │   └── img002.jpg
 │   └── annotations/
 │       ├── img001.json
 │       └── img002.json
-└── valid/
+└── valid/                    # Optional but recommended
     ├── images/
     └── annotations/
 ```
+
+> **Note**: Validation data (`data/valid/`) is **optional** but strongly recommended for monitoring training progress and preventing overfitting.
 
 **Annotation format** (JSON per image):
 ```json
@@ -221,10 +223,17 @@ python3 train_sam3_lora_native.py --config configs/my_config.yaml
 ### Model Checkpointing
 
 During training, two models are automatically saved:
-- **`best_lora_weights.pt`**: Best model based on validation loss (recommended for inference)
+- **`best_lora_weights.pt`**: Best model based on validation loss (or copy of last if no validation)
 - **`last_lora_weights.pt`**: Model from the last epoch
 
-Training monitors validation loss and saves the best model automatically.
+**With validation data**: Training monitors validation loss and saves the best model automatically.
+
+**Without validation data**: Training continues normally but saves the last epoch as both files. You'll see:
+```
+⚠️ No validation data found - training without validation
+...
+ℹ️ No validation data - consider adding data/valid/ for better model selection
+```
 
 ### Training Tips
 
@@ -597,6 +606,15 @@ lora:
 Expected: ~0.5-2% (for rank 4-16)
 If you see 63%: Base model not frozen (bug fixed in latest version)
 ```
+
+**7. No Validation Data**
+```
+⚠️ No validation data found - training without validation
+```
+**Solution:**
+- Create `data/valid/` directory with same structure as `data/train/`
+- Split your data: ~80% train, ~20% validation
+- Training will work without validation but you won't see validation metrics
 
 ### Performance Benchmarks
 
