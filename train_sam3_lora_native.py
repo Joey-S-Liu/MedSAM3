@@ -357,8 +357,20 @@ class SAM3TrainerNative:
                         if isinstance(v, torch.Tensor):
                             targets[k] = v.to(self.device)
 
+                # Add matcher indices to outputs (required by Sam3LossWrapper)
+                # We need to add "indices" to each output dict (main + aux_outputs)
+                for stage_outputs in outputs_list:
+                    for outputs in stage_outputs:
+                        # Compute indices for main output
+                        outputs["indices"] = self.matcher(outputs, find_targets[0])
+
+                        # Also add indices to auxiliary outputs if they exist
+                        if "aux_outputs" in outputs:
+                            for aux_out in outputs["aux_outputs"]:
+                                aux_out["indices"] = self.matcher(aux_out, find_targets[0])
+
                 # Compute loss using Sam3LossWrapper
-                # This handles matcher, num_boxes calculation, and proper weighting
+                # This handles num_boxes calculation and proper weighting
                 loss_dict = self.loss_wrapper(outputs_list, find_targets)
 
                 # Extract total loss
@@ -393,6 +405,14 @@ class SAM3TrainerNative:
                             for k, v in targets.items():
                                 if isinstance(v, torch.Tensor):
                                     targets[k] = v.to(self.device)
+
+                        # Add matcher indices to outputs (required by Sam3LossWrapper)
+                        for stage_outputs in outputs_list:
+                            for outputs in stage_outputs:
+                                outputs["indices"] = self.matcher(outputs, find_targets[0])
+                                if "aux_outputs" in outputs:
+                                    for aux_out in outputs["aux_outputs"]:
+                                        aux_out["indices"] = self.matcher(aux_out, find_targets[0])
 
                         # Compute loss using Sam3LossWrapper
                         loss_dict = self.loss_wrapper(outputs_list, find_targets)
