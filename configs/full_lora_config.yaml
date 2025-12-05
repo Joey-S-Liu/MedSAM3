@@ -24,10 +24,10 @@ lora:
 
   # Apply LoRA to ALL components
   apply_to_vision_encoder: true
-  apply_to_text_encoder: false
-  apply_to_geometry_encoder: false
-  apply_to_detr_encoder: false
-  apply_to_detr_decoder: false
+  apply_to_text_encoder: true
+  apply_to_geometry_encoder: true
+  apply_to_detr_encoder: true
+  apply_to_detr_decoder: true
   apply_to_mask_decoder: true
 
 # Training settings
@@ -44,7 +44,7 @@ training:
   adam_epsilon: 1e-8
   max_grad_norm: 1.0
 
-  num_epochs: 20
+  num_epochs: 200
   warmup_steps: 1000
   lr_scheduler: "cosine"
 
