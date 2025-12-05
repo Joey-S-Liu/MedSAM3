@@ -34,7 +34,7 @@ lora:
 training:
   train_data_path: "data/train"
   val_data_path: "/workspace/sam3_lora/data/valid"
-  batch_size: 2           # Smaller batch due to more parameters
+  batch_size: 3           # Smaller batch due to more parameters
   num_workers: 4
 
   learning_rate: 5e-5        # Lower LR for stability
