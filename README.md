@@ -8,7 +8,7 @@
 
 **Train SAM3 segmentation models with 99% fewer trainable parameters**
 
-[Quick Start](#quick-start) • [Training](#training) • [Inference](#inference) • [Crack Detection Example](#real-world-example-concrete-crack-detection) • [Configuration](#configuration)
+[Quick Start](#quick-start) • [Architecture](#architecture) • [Training](#training) • [Inference](#inference) • [Examples](#real-world-example-concrete-crack-detection) • [Configuration](#configuration)
 
 </div>
 
@@ -35,6 +35,41 @@ W' = W_frozen + B×A  (where rank << model_dim)
 ```
 
 **Result**: Only ~1% of parameters need training!
+
+### Architecture
+
+SAM3-LoRA applies Low-Rank Adaptation to key components of the SAM3 architecture:
+
+<div align="center">
+<img src="asset/Screenshot 2568-12-06 at 07.00.16.png" alt="SAM3 Architecture with LoRA" width="900">
+<br>
+<em>SAM3 Model Architecture with Full LoRA Adaptation</em>
+</div>
+
+<br>
+
+**LoRA Adapters Applied To:**
+
+| Component | Description | LoRA Impact |
+|-----------|-------------|-------------|
+| **Vision Encoder (ViT)** | Extracts visual features from input images | High - Primary feature learning |
+| **Text Encoder** | Processes text prompts for guided segmentation | Medium - Semantic understanding |
+| **Geometry Encoder** | Handles geometric prompts (boxes, points) | Medium - Spatial reasoning |
+| **DETR Encoder** | Transformer encoder for object detection | High - Scene understanding |
+| **DETR Decoder** | Transformer decoder for object queries | High - Object localization |
+| **Mask Decoder** | Generates segmentation masks | High - Fine-grained segmentation |
+
+**Data Flow:**
+1. **Input**: Image + Text/Geometric prompts
+2. **Encoding**: Multiple encoders process different modalities
+3. **Transformation**: DETR encoder-decoder refines representations
+4. **Output**: High-quality segmentation masks
+
+**LoRA Benefits:**
+- ✅ Only ~1% parameters trainable (frozen base + small adapters)
+- ✅ Adapters can be swapped for different tasks
+- ✅ Original model weights preserved
+- ✅ Efficient storage (10-50MB vs 3GB full model)
 
 ---
 
