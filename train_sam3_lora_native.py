@@ -1,4 +1,16 @@
 
+#!/usr/bin/env python3
+"""
+SAM3 LoRA Training Script
+
+Validation Strategy (Following SAM3):
+  - During training: Only compute validation LOSS (fast, no metrics)
+  - After training: Run validate_sam3_lora.py for full metrics (mAP, cgF1) with NMS
+
+This approach significantly speeds up training by avoiding expensive metric computation
+during each epoch, while still monitoring overfitting via validation loss.
+"""
+
 import os
 import argparse
 import yaml
@@ -25,13 +37,11 @@ from sam3.model.box_ops import box_xywh_to_xyxy
 from lora_layers import LoRAConfig, apply_lora_to_model, save_lora_weights, count_parameters
 
 from torchvision.transforms import v2
+import pycocotools.mask as mask_utils  # Required for RLE mask decoding in COCO dataset
+from sam3.train.masks_ops import rle_encode  # For encoding masks to RLE format
 
-# Import evaluation modules
-from sam3.eval.cgf1_eval import CGF1Evaluator, COCOCustom
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
-import pycocotools.mask as mask_utils
-from sam3.train.masks_ops import rle_encode
+# Note: Evaluation modules (mAP, cgF1, NMS) are in validate_sam3_lora.py
+# Training only computes validation loss, following SAM3's approach
 
 class COCOSegmentDataset(Dataset):
     """Dataset class for COCO format segmentation data"""
@@ -460,6 +470,229 @@ def create_coco_gt_from_dataset(dataset, image_ids=None, mask_resolution=288):
     return coco_gt
 
 
+def convert_predictions_to_coco_format_original_res(predictions_list, image_ids, dataset, model_resolution=288, score_threshold=0.0, merge_overlaps=True, iou_threshold=0.3, debug=False):
+    """
+    Convert model predictions to COCO format at ORIGINAL image resolution.
+
+    This matches the inference approach (infer_sam.py) where:
+    1. Masks are upsampled from 288x288 to original image size
+    2. Boxes are scaled to original image size
+    3. Evaluation happens at original resolution
+
+    Args:
+        predictions_list: List of predictions per image
+        image_ids: List of image IDs (indices into dataset)
+        dataset: Dataset to get original image sizes
+        model_resolution: Model output resolution (default: 288)
+        score_threshold: Confidence threshold
+        merge_overlaps: Whether to merge overlapping predictions
+        iou_threshold: IoU threshold for merging
+        debug: Print debug info
+    """
+    coco_predictions = []
+    pred_id = 0
+
+    if debug:
+        print(f"\n[DEBUG] Converting {len(predictions_list)} predictions to COCO format (ORIGINAL RESOLUTION)...")
+        if merge_overlaps:
+            print(f"[DEBUG] Overlapping segment merging ENABLED (IoU threshold={iou_threshold})")
+
+    for img_id, preds in zip(image_ids, predictions_list):
+        if preds is None or len(preds.get('pred_logits', [])) == 0:
+            continue
+
+        # Get original image size from dataset
+        datapoint = dataset[img_id]
+        orig_h, orig_w = datapoint.find_queries[0].inference_metadata.original_size
+
+        logits = preds['pred_logits']
+        boxes = preds['pred_boxes']
+        masks = preds['pred_masks']  # [N, 288, 288]
+
+        scores = torch.sigmoid(logits).squeeze(-1)
+
+        # Filter by score threshold
+        valid_mask = scores > score_threshold
+        num_before = len(scores)
+        scores = scores[valid_mask]
+        boxes = boxes[valid_mask]
+        masks = masks[valid_mask]
+
+        if debug and img_id == image_ids[0]:
+            print(f"[DEBUG] Image {img_id}: {num_before} queries -> {len(scores)} after filtering (threshold={score_threshold})")
+            if len(scores) > 0:
+                print(f"[DEBUG]   Original size: {orig_w}x{orig_h}")
+                print(f"[DEBUG]   Filtered scores: min={scores.min():.4f}, max={scores.max():.4f}, mean={scores.mean():.4f}")
+
+        if len(masks) == 0:
+            continue
+
+        # Upsample masks from 288x288 to original resolution (like infer_sam.py)
+        # Process on GPU then immediately move to CPU to save memory
+        masks_sigmoid = torch.sigmoid(masks)  # [N, 288, 288]
+        masks_upsampled = torch.nn.functional.interpolate(
+            masks_sigmoid.unsqueeze(1).float(),  # [N, 1, 288, 288]
+            size=(orig_h, orig_w),
+            mode='bilinear',
+            align_corners=False
+        ).squeeze(1)  # [N, orig_h, orig_w]
+
+        binary_masks = (masks_upsampled > 0.5).cpu()
+
+        # Free GPU memory immediately after upsampling
+        del masks_sigmoid, masks_upsampled
+        torch.cuda.empty_cache()
+
+        # Merge overlapping predictions
+        if merge_overlaps and len(binary_masks) > 0:
+            num_before_merge = len(binary_masks)
+            binary_masks, scores, boxes = merge_overlapping_masks(
+                binary_masks, scores.cpu(), boxes.cpu(), iou_threshold=iou_threshold
+            )
+            if debug and img_id == image_ids[0]:
+                print(f"[DEBUG]   Merged {num_before_merge} predictions -> {len(binary_masks)} (IoU threshold={iou_threshold})")
+
+        if len(binary_masks) > 0:
+            mask_areas = binary_masks.flatten(1).sum(1)
+
+            if debug and img_id == image_ids[0]:
+                print(f"[DEBUG]   Upsampled mask shape: {binary_masks.shape}")
+                print(f"[DEBUG]   Mask areas: min={mask_areas.min():.0f}, max={mask_areas.max():.0f}, mean={mask_areas.float().mean():.0f}")
+
+            rles = rle_encode(binary_masks)
+
+            for idx, (rle, score, box) in enumerate(zip(rles, scores.cpu().tolist(), boxes.cpu().tolist())):
+                # Convert box from normalized [0,1] to original image coordinates
+                cx, cy, w_norm, h_norm = box
+                x = (cx - w_norm/2) * orig_w
+                y = (cy - h_norm/2) * orig_h
+                w = w_norm * orig_w
+                h = h_norm * orig_h
+
+                # Clamp coordinates to image bounds
+                x = max(0, min(x, orig_w))
+                y = max(0, min(y, orig_h))
+                w = max(0, min(w, orig_w - x))
+                h = max(0, min(h, orig_h - y))
+
+                # Skip if box is too small after clamping
+                if w < 1 or h < 1:
+                    continue
+
+                pred_dict = {
+                    'image_id': int(img_id),
+                    'category_id': 1,
+                    'segmentation': rle,
+                    'bbox': [float(x), float(y), float(w), float(h)],
+                    'score': float(score),
+                    'id': pred_id
+                }
+
+                if debug and img_id == image_ids[0] and idx == 0:
+                    print(f"[DEBUG]   First prediction bbox (at {orig_w}x{orig_h}): {pred_dict['bbox']}")
+
+                coco_predictions.append(pred_dict)
+                pred_id += 1
+
+    return coco_predictions
+
+
+def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=False):
+    """
+    Create COCO ground truth dictionary from dataset at ORIGINAL resolution.
+
+    This matches the inference approach (infer_sam.py) where GT is kept
+    at original image size for evaluation.
+
+    Args:
+        dataset: Dataset with images and annotations
+        image_ids: List of image IDs to include (None = all)
+        debug: Print debug info
+    """
+    if debug:
+        print(f"\n[DEBUG] Creating COCO ground truth (ORIGINAL RESOLUTION)...")
+
+    coco_gt = {
+        'info': {
+            'description': 'SAM3 LoRA Validation Dataset',
+            'version': '1.0',
+            'year': 2024
+        },
+        'images': [],
+        'annotations': [],
+        'categories': [{'id': 1, 'name': 'object'}]
+    }
+
+    ann_id = 0
+    indices = range(len(dataset)) if image_ids is None else image_ids
+
+    for idx in indices:
+        datapoint = dataset[idx]
+
+        # Get original image size
+        orig_h, orig_w = datapoint.find_queries[0].inference_metadata.original_size
+
+        coco_gt['images'].append({
+            'id': int(idx),
+            'width': orig_w,
+            'height': orig_h,
+            'is_instance_exhaustive': True
+        })
+
+        for obj in datapoint.images[0].objects:
+            # Scale boxes from normalized [0,1] to original size
+            box = obj.bbox  # Already in [0,1] normalized coordinates
+            x1, y1, x2, y2 = box.tolist()
+
+            # Convert to original image coordinates
+            x1_orig = x1 * orig_w
+            y1_orig = y1 * orig_h
+            x2_orig = x2 * orig_w
+            y2_orig = y2 * orig_h
+
+            # Convert to COCO format [x, y, w, h]
+            x, y = x1_orig, y1_orig
+            w = x2_orig - x1_orig
+            h = y2_orig - y1_orig
+
+            ann = {
+                'id': ann_id,
+                'image_id': int(idx),
+                'category_id': 1,
+                'bbox': [x, y, w, h],
+                'area': w * h,
+                'iscrowd': 0,
+                'ignore': 0
+            }
+
+            if obj.segment is not None:
+                # Upsample mask from 1008x1008 to original size
+                mask_tensor = obj.segment.unsqueeze(0).unsqueeze(0).float()
+                upsampled_mask = torch.nn.functional.interpolate(
+                    mask_tensor,
+                    size=(orig_h, orig_w),
+                    mode='bilinear',
+                    align_corners=False
+                ) > 0.5
+
+                mask_np = upsampled_mask.squeeze().cpu().numpy().astype(np.uint8)
+                rle = mask_utils.encode(np.asfortranarray(mask_np))
+                rle['counts'] = rle['counts'].decode('utf-8')
+                ann['segmentation'] = rle
+
+            coco_gt['annotations'].append(ann)
+            ann_id += 1
+
+    if debug:
+        print(f"[DEBUG] Created {len(coco_gt['images'])} images, {len(coco_gt['annotations'])} annotations")
+        if len(coco_gt['annotations']) > 0:
+            sample_gt = coco_gt['annotations'][0]
+            sample_img = coco_gt['images'][0]
+            print(f"[DEBUG] Sample GT: image_id={sample_gt['image_id']}, bbox={sample_gt['bbox']}, image_size={sample_img['width']}x{sample_img['height']}")
+
+    return coco_gt
+
+
 class SAM3TrainerNative:
     def __init__(self, config_path):
         with open(config_path, "r") as f:
@@ -704,17 +937,13 @@ class SAM3TrainerNative:
 
                 pbar.set_postfix({"loss": total_loss.item()})
 
-            # Validation (only if validation data exists)
+            # Validation (only compute loss - no metrics, like SAM3)
             if has_validation and val_loader is not None:
                 self.model.eval()
                 val_losses = []
-                all_predictions = []
-                all_image_ids = []
-                running_img_id = 0  # Use running counter instead of batch_idx calculation
 
                 with torch.no_grad():
                     val_pbar = tqdm(val_loader, desc=f"Validation")
-                    batch_idx = 0
 
                     for batch_dict in val_pbar:
                         input_batch = batch_dict["input"]
@@ -749,135 +978,27 @@ class SAM3TrainerNative:
                         total_loss = loss_dict[CORE_LOSS_KEY]
 
                         val_losses.append(total_loss.item())
-
-                        # Collect predictions for metrics computation (move to CPU to save memory)
-                        # Extract the final stage predictions
-                        with SAM3Output.iteration_mode(
-                            outputs_list, iter_mode=SAM3Output.IterMode.ALL_STEPS_PER_STAGE
-                        ) as outputs_iter:
-                            final_stage = list(outputs_iter)[-1]  # Get last stage
-                            final_outputs = final_stage[-1]  # Get last step
-
-                            # Get batch size from outputs
-                            batch_size = final_outputs['pred_logits'].shape[0]
-
-                            for i in range(batch_size):
-                                all_image_ids.append(running_img_id)
-                                # Move predictions to CPU immediately to save GPU memory
-                                all_predictions.append({
-                                    'pred_logits': final_outputs['pred_logits'][i].detach().cpu(),
-                                    'pred_boxes': final_outputs['pred_boxes'][i].detach().cpu(),
-                                    'pred_masks': final_outputs['pred_masks'][i].detach().cpu()
-                                })
-                                running_img_id += 1
-
-                        batch_idx += 1
                         val_pbar.set_postfix({"val_loss": total_loss.item()})
 
-                        # Clear CUDA cache periodically to prevent memory buildup
-                        if batch_idx % 5 == 0:
-                            torch.cuda.empty_cache()
-
                 avg_val_loss = sum(val_losses) / len(val_losses)
+                print(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
 
-                # Compute mAP and cgF1 metrics
-                print(f"\nEpoch {epoch+1}/{epochs} - Validation Loss: {avg_val_loss:.6f}")
-                print("Computing instance segmentation metrics...")
-
-                try:
-                    # Create COCO ground truth (downsampled to 288×288 - fast!)
-                    coco_gt_dict = create_coco_gt_from_dataset(
-                        val_ds,
-                        image_ids=all_image_ids,
-                        mask_resolution=288  # Downsample GT to match predictions
-                    )
-
-                    # Convert predictions to COCO format (at native 288×288 - fast!)
-                    # Enable overlapping segment merging to avoid over-segmentation penalty
-                    coco_predictions = convert_predictions_to_coco_format(
-                        all_predictions,
-                        all_image_ids,
-                        resolution=288,  # Native model output resolution
-                        score_threshold=0.05,
-                        merge_overlaps=True,  # Merge overlapping predictions (matches test evaluation)
-                        iou_threshold=0.3,     # IoU threshold for merging
-                        debug=False
-                    )
-
-                    if len(coco_predictions) > 0:
-                        # Save temporary files for evaluation
-                        temp_gt_file = out_dir / "temp_gt.json"
-                        temp_pred_file = out_dir / "temp_pred.json"
-
-                        with open(temp_gt_file, 'w') as f:
-                            json.dump(coco_gt_dict, f)
-                        with open(temp_pred_file, 'w') as f:
-                            json.dump(coco_predictions, f)
-
-                        # Compute mAP using COCO evaluation (suppress detailed output)
-                        with open(os.devnull, 'w') as devnull:
-                            with contextlib.redirect_stdout(devnull):
-                                coco_gt = COCO(str(temp_gt_file))
-                                coco_dt = coco_gt.loadRes(str(temp_pred_file))
-                                coco_eval = COCOeval(coco_gt, coco_dt, 'segm')
-                                coco_eval.params.useCats = False
-                                coco_eval.evaluate()
-                                coco_eval.accumulate()
-                                coco_eval.summarize()
-
-                        # Extract key metrics
-                        map_segm = coco_eval.stats[0]  # mAP @ IoU=0.50:0.95
-                        map50_segm = coco_eval.stats[1]  # mAP @ IoU=0.50
-                        map75_segm = coco_eval.stats[2]  # mAP @ IoU=0.75
-
-                        # Compute cgF1 using CGF1Evaluator (suppress detailed output)
-                        with open(os.devnull, 'w') as devnull:
-                            with contextlib.redirect_stdout(devnull):
-                                cgf1_evaluator = CGF1Evaluator(
-                                    gt_path=str(temp_gt_file),
-                                    iou_type='segm',
-                                    verbose=False
-                                )
-                                cgf1_results = cgf1_evaluator.evaluate(str(temp_pred_file))
-
-                        # Extract cgF1 metrics
-                        cgf1 = cgf1_results.get('cgF1_eval_segm_cgF1', 0.0)
-                        cgf1_50 = cgf1_results.get('cgF1_eval_segm_cgF1@0.5', 0.0)
-                        cgf1_75 = cgf1_results.get('cgF1_eval_segm_cgF1@0.75', 0.0)
-
-                        print(f"Metrics: mAP={map_segm:.4f} mAP@50={map50_segm:.4f} mAP@75={map75_segm:.4f} | cgF1={cgf1:.4f} cgF1@50={cgf1_50:.4f} cgF1@75={cgf1_75:.4f}")
-
-                        # Clean up temporary files
-                        temp_gt_file.unlink()
-                        temp_pred_file.unlink()
-                    else:
-                        print("No predictions with score > 0.05. Skipping metrics computation.")
-                        map_segm = 0.0
-                        cgf1 = 0.0
-
-                except Exception as e:
-                    print(f"Error computing metrics: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    map_segm = 0.0
-                    cgf1 = 0.0
-
-                # Free memory from predictions
-                del all_predictions
-                del all_image_ids
-                torch.cuda.empty_cache()
-
-                # Save models based on validation performance
-                # Always save last model
+                # Save models based on validation loss
                 save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
 
-                # Save best model only when validation loss improves
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     save_lora_weights(self.model, str(out_dir / "best_lora_weights.pt"))
-                    print(f"✓ New best model (val_loss: {avg_val_loss:.6f})")
+                    print(f"✓ New best model saved (val_loss: {avg_val_loss:.6f})")
 
-                # Clear CUDA cache before going back to training
+                # Log to file
+                with open(out_dir / "val_stats.json", "a") as f:
+                    f.write(json.dumps({
+                        "epoch": epoch + 1,
+                        "train_loss": avg_train_loss,
+                        "val_loss": avg_val_loss
+                    }) + "\n")
+
                 torch.cuda.empty_cache()
 
                 # Back to training mode
@@ -889,11 +1010,20 @@ class SAM3TrainerNative:
         # Final save
 
         if has_validation:
-            print(f"\n✅ Training complete!")
+            print(f"\n{'='*80}")
+            print(f"✅ Training complete!")
+            print(f"{'='*80}")
             print(f"Best validation loss: {best_val_loss:.6f}")
-            print(f"Models saved to {out_dir}:")
-            print(f"  - best_lora_weights.pt (best validation)")
+            print(f"\nModels saved to {out_dir}:")
+            print(f"  - best_lora_weights.pt (best validation loss)")
             print(f"  - last_lora_weights.pt (last epoch)")
+            print(f"\n📊 To compute full metrics (mAP, cgF1) with NMS:")
+            print(f"   python validate_sam3_lora.py \\")
+            print(f"     --config {args.config} \\")
+            print(f"     --weights {out_dir}/best_lora_weights.pt \\")
+            print(f"     --data_dir /workspace/data2 \\")
+            print(f"     --split valid")
+            print(f"{'='*80}")
         else:
             # If no validation, copy last to best
             import shutil
@@ -902,11 +1032,14 @@ class SAM3TrainerNative:
             if last_path.exists():
                 shutil.copy(last_path, best_path)
 
-            print(f"\n✅ Training complete!")
-            print(f"Models saved to {out_dir}:")
+            print(f"\n{'='*80}")
+            print(f"✅ Training complete!")
+            print(f"{'='*80}")
+            print(f"\nModels saved to {out_dir}:")
             print(f"  - best_lora_weights.pt (copy of last epoch)")
             print(f"  - last_lora_weights.pt (last epoch)")
             print(f"\nℹ️  No validation data - consider adding data/valid/ for better model selection")
+            print(f"{'='*80}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train SAM3 with LoRA")

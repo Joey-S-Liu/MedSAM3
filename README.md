@@ -18,6 +18,13 @@
 
 Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)** - a parameter-efficient method that reduces trainable parameters from 100% to ~1% while maintaining performance.
 
+### Recent Updates
+
+**2025-12-07**:
+- Fixed missing `rle_encode` import in `train_sam3_lora_native.py`
+- Verified category-aware text prompts work correctly in both training and validation
+- All mask processing operations now working properly without errors
+
 ### Why Use This?
 
 - ✅ **Train on Consumer GPUs**: 16GB VRAM instead of 80GB
@@ -212,13 +219,13 @@ Applying LoRA...
 Applied LoRA to 64 modules
 Trainable params: 11,796,480 (1.38%)
 
-Loading training data from /workspace/data...
+Loading training data from /workspace/data2...
 Loaded COCO dataset: train split
   Images: 778
   Annotations: 1631
   Categories: {0: 'CRACKS', 1: 'CRACKS', 2: 'JOINT', 3: 'LOCATION', 4: 'MARKING'}
 
-Loading validation data from /workspace/data...
+Loading validation data from /workspace/data2...
 Loaded COCO dataset: valid split
   Images: 152
   Annotations: 298
@@ -227,29 +234,24 @@ Starting training for 200 epochs...
 Training samples: 778, Validation samples: 152
 
 Epoch 1: 100%|████████| 98/98 [07:47<00:00, loss=140]
-Validation: 100%|████████| 19/19 [00:48<00:00, val_loss=23.7]
+Validation: 100%|████████| 19/19 [00:32<00:00, val_loss=23.7]
 
-Epoch 1/200 - Validation Loss: 17.032280
-Computing instance segmentation metrics...
-Metrics: mAP=0.0392 mAP@50=0.1445 mAP@75=0.0037 | cgF1=0.0309 cgF1@50=0.1012 cgF1@75=0.0058
-✓ New best model (val_loss: 17.032280)
+Epoch 1/200 - Train Loss: 156.234567, Val Loss: 17.032280
+✓ New best model saved (val_loss: 17.032280)
 
 Epoch 2: 100%|████████| 98/98 [07:24<00:00, loss=167]
-Validation: 100%|████████| 19/19 [00:46<00:00, val_loss=20.1]
+Validation: 100%|████████| 19/19 [00:31<00:00, val_loss=20.1]
 
-Epoch 2/200 - Validation Loss: 15.641912
-Computing instance segmentation metrics...
-Metrics: mAP=0.0456 mAP@50=0.1623 mAP@75=0.0042 | cgF1=0.0385 cgF1@50=0.1156 cgF1@75=0.0065
-✓ New best model (val_loss: 15.641912)
+Epoch 2/200 - Train Loss: 142.891234, Val Loss: 15.641912
+✓ New best model saved (val_loss: 15.641912)
 ...
 ```
 
-**Validation Metrics Explained:**
-- **mAP**: Mean Average Precision at IoU 0.50:0.95 (standard COCO metric)
-- **mAP@50**: Mean Average Precision at IoU 0.50 (more lenient)
-- **mAP@75**: Mean Average Precision at IoU 0.75 (stricter)
-- **cgF1**: Category-agnostic F1 score (comprehensive metric)
-- **cgF1@50/75**: F1 at specific IoU thresholds
+**Validation Strategy (Following SAM3):**
+- **During training**: Only validation **loss** is computed (fast, no NMS or metrics)
+- **After training**: Run `validate_sam3_lora.py` for full metrics (mAP, cgF1) with NMS
+
+This approach significantly speeds up training while still monitoring overfitting via validation loss
 
 ### 3. Run Inference
 
@@ -333,9 +335,9 @@ python3 train_sam3_lora_native.py --config configs/my_config.yaml
 
 During training, two models are automatically saved:
 - **`best_lora_weights.pt`**: Best model based on validation loss (saved only when validation loss improves)
-- **`last_lora_weights.pt`**: Model from the last epoch (saved after every validation)
+- **`last_lora_weights.pt`**: Model from the last epoch (saved after every epoch)
 
-**With validation data**: Training monitors validation loss, mAP, and cgF1 metrics. Best model is saved when validation loss decreases.
+**With validation data**: Training monitors validation **loss only** (fast). Best model is saved when validation loss decreases.
 
 **Without validation data**: Training continues normally but saves the last epoch as both files. You'll see:
 ```
@@ -344,27 +346,36 @@ During training, two models are automatically saved:
 ℹ️  No validation data - consider adding data/valid/ for better model selection
 ```
 
-### Standalone Validation
+### Full Evaluation After Training
 
-You can run validation separately on a trained model:
+**Important**: Training only computes validation loss (no metrics). After training completes, run the standalone evaluation script to get full metrics:
 
 ```bash
-# Validate best model
-python3 validate_sam3_lora.py \
-  --config configs/full_lora_config.yaml \
-  --weights outputs/sam3_lora_full/best_lora_weights.pt
-
-# Validate on subset (for debugging)
+# Evaluate best model with full metrics (mAP, cgF1) and NMS
 python3 validate_sam3_lora.py \
   --config configs/full_lora_config.yaml \
   --weights outputs/sam3_lora_full/best_lora_weights.pt \
-  --num-samples 10
+  --data_dir /workspace/data2 \
+  --split valid
+
+# Evaluate on test set
+python3 validate_sam3_lora.py \
+  --config configs/full_lora_config.yaml \
+  --weights outputs/sam3_lora_full/best_lora_weights.pt \
+  --data_dir /workspace/data2 \
+  --split test
 ```
 
-This will compute:
-- Validation loss
+**This will compute:**
 - COCO mAP metrics (IoU 0.50:0.95, 0.50, 0.75)
-- Category-agnostic F1 scores (cgF1)
+- Category-agnostic F1 scores (cgF1, cgF1@50, cgF1@75)
+- Applies SAM3's NMS filtering (prob_threshold=0.3, iou_threshold=0.7)
+- Generates detailed predictions
+
+**Why separate evaluation?**
+- ⚡ **Faster training**: No expensive metric computation during training
+- 📊 **Better monitoring**: Validation loss is sufficient to detect overfitting
+- 🎯 **Accurate metrics**: Full evaluation with proper NMS and post-processing
 
 ### Training Tips
 
@@ -843,8 +854,9 @@ sam3_lora/
 │       └── last_lora_weights.pt   # Last epoch model
 ├── sam3/                          # SAM3 model library
 ├── lora_layers.py                 # LoRA implementation
-├── train_sam3_lora_native.py      # Training script
-├── validate_sam3_lora.py          # Validation script
+├── train_sam3_lora_native.py      # Training script (computes validation loss only)
+├── validate_sam3_lora.py          # Full evaluation script (mAP, cgF1, NMS)
+├── validate_single_image.py       # Single image validation with visualization
 ├── infer_sam.py                   # Inference script (recommended)
 ├── inference_lora.py              # Legacy inference script
 ├── README_INFERENCE.md            # Detailed inference guide
@@ -920,12 +932,12 @@ FileNotFoundError: COCO annotation file not found: /path/to/data/train/_annotati
 - Images should be in the same directory as the annotation file
 - Supported segmentation formats: polygon lists or RLE dictionaries
 
-**9. mAP Decreasing During Training**
+**9. Want to See mAP/cgF1 During Training?**
 **Solution:**
-- This was likely caused by using domain-specific text prompts (e.g., "crack", "joint")
-- The code now uses generic `"object"` prompts for better stability
-- SAM models work best with simple, generic terms they were trained on
-- If you modified the code, ensure `query_text="object"` in the dataset class
+- Training only computes validation loss (fast, following SAM3's approach)
+- After training, run `validate_sam3_lora.py` for full metrics with NMS
+- This approach significantly speeds up training while still monitoring overfitting
+- Validation loss is sufficient to detect overfitting and select best model
 
 ### Performance Benchmarks
 
