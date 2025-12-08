@@ -654,11 +654,22 @@ def validate(config_path, weights_path, data_dir, split="valid", num_samples=Non
     """Run validation with full metrics (mAP, cgF1) and SAM3 NMS
 
     Args:
-        config_path: Path to config file (for LoRA settings)
+        config_path: Path to config file (for LoRA settings only)
         weights_path: Path to LoRA weights
-        data_dir: Root directory containing train/valid/test folders
-        split: Dataset split to validate on ('train', 'valid', or 'test')
+        data_dir: Root directory containing train/valid/test subdirectories
+                  (e.g., /workspace/data2 which contains /workspace/data2/valid/)
+        split: Which subdirectory to use ('train', 'valid', or 'test')
+               The script will load from {data_dir}/{split}/
         num_samples: Optional limit for number of samples (for debugging)
+
+    Example:
+        validate(
+            config_path="configs/full_lora_config.yaml",
+            weights_path="outputs/sam3_lora_full/best_lora_weights.pt",
+            data_dir="/workspace/data2",
+            split="valid"
+        )
+        # This loads validation data from /workspace/data2/valid/_annotations.coco.json
     """
 
     # Load config
@@ -909,14 +920,15 @@ if __name__ == "__main__":
         "--data_dir",
         type=str,
         required=True,
-        help="Root directory containing train/valid/test folders with COCO annotations"
+        help="Root directory containing train/valid/test subdirectories (e.g., /workspace/data2)"
     )
     parser.add_argument(
         "--split",
         type=str,
         default="valid",
         choices=["train", "valid", "test"],
-        help="Dataset split to validate on (default: valid)"
+        help="Which subdirectory to load from: 'train', 'valid', or 'test' (default: valid). "
+             "Script will load from {data_dir}/{split}/_annotations.coco.json"
     )
     parser.add_argument(
         "--num-samples",
