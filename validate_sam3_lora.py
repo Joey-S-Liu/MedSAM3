@@ -650,26 +650,23 @@ def move_to_device(obj, device):
     return obj
 
 
-def validate(config_path, weights_path, data_dir, split="valid", num_samples=None):
+def validate(config_path, weights_path, val_data_dir, num_samples=None):
     """Run validation with full metrics (mAP, cgF1) and SAM3 NMS
 
     Args:
         config_path: Path to config file (for LoRA settings only)
         weights_path: Path to LoRA weights
-        data_dir: Root directory containing train/valid/test subdirectories
-                  (e.g., /workspace/data2 which contains /workspace/data2/valid/)
-        split: Which subdirectory to use ('train', 'valid', or 'test')
-               The script will load from {data_dir}/{split}/
+        val_data_dir: Direct path to validation data directory containing _annotations.coco.json
+                      (e.g., /workspace/data2/valid)
         num_samples: Optional limit for number of samples (for debugging)
 
     Example:
         validate(
             config_path="configs/full_lora_config.yaml",
             weights_path="outputs/sam3_lora_full/best_lora_weights.pt",
-            data_dir="/workspace/data2",
-            split="valid"
+            val_data_dir="/workspace/data2/valid"
         )
-        # This loads validation data from /workspace/data2/valid/_annotations.coco.json
+        # This loads from /workspace/data2/valid/_annotations.coco.json
     """
 
     # Load config
@@ -716,9 +713,56 @@ def validate(config_path, weights_path, data_dir, split="valid", num_samples=Non
     model.to(device)
     model.eval()
 
-    # Load validation data
-    print(f"\nLoading {split} data from {data_dir}...")
-    val_ds = COCOSegmentDataset(data_dir=data_dir, split=split)
+    # Load validation data directly from the specified directory
+    print(f"\nLoading validation data from {val_data_dir}...")
+
+    # Load COCO annotations directly
+    from pathlib import Path
+    ann_file = Path(val_data_dir) / "_annotations.coco.json"
+    if not ann_file.exists():
+        raise FileNotFoundError(f"COCO annotation file not found: {ann_file}")
+
+    # Create a simple dataset class that loads from the directory directly
+    class DirectCOCODataset(COCOSegmentDataset):
+        def __init__(self, data_dir):
+            self.data_dir = Path(data_dir)
+            self.split_dir = self.data_dir
+
+            # Load COCO annotations
+            ann_file = self.split_dir / "_annotations.coco.json"
+            if not ann_file.exists():
+                raise FileNotFoundError(f"COCO annotation file not found: {ann_file}")
+
+            with open(ann_file, 'r') as f:
+                self.coco_data = json.load(f)
+
+            # Build index: image_id -> image info
+            self.images = {img['id']: img for img in self.coco_data['images']}
+            self.image_ids = sorted(list(self.images.keys()))
+
+            # Build index: image_id -> list of annotations
+            self.img_to_anns = {}
+            for ann in self.coco_data['annotations']:
+                img_id = ann['image_id']
+                if img_id not in self.img_to_anns:
+                    self.img_to_anns[img_id] = []
+                self.img_to_anns[img_id].append(ann)
+
+            # Load categories
+            self.categories = {cat['id']: cat['name'] for cat in self.coco_data['categories']}
+            print(f"Loaded COCO dataset from {data_dir}")
+            print(f"  Images: {len(self.image_ids)}")
+            print(f"  Annotations: {len(self.coco_data['annotations'])}")
+            print(f"  Categories: {self.categories}")
+
+            self.resolution = 1008
+            self.transform = v2.Compose([
+                v2.ToImage(),
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ])
+
+    val_ds = DirectCOCODataset(val_data_dir)
 
     if num_samples:
         print(f"\n[INFO] Limiting validation to {num_samples} samples for debugging")
@@ -794,7 +838,7 @@ def validate(config_path, weights_path, data_dir, split="valid", num_samples=Non
     print("="*80)
 
     # Create COCO ground truth (downsampled to 288×288 - fast!)
-    print(f"\n[INFO] Creating ground truth from {split} dataset...")
+    print(f"\n[INFO] Creating ground truth from validation dataset...")
     coco_gt_dict = create_coco_gt_from_dataset(
         val_ds,
         image_ids=all_image_ids,
@@ -917,18 +961,10 @@ if __name__ == "__main__":
         help="Path to LoRA weights file"
     )
     parser.add_argument(
-        "--data_dir",
+        "--val_data_dir",
         type=str,
         required=True,
-        help="Root directory containing train/valid/test subdirectories (e.g., /workspace/data2)"
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="valid",
-        choices=["train", "valid", "test"],
-        help="Which subdirectory to load from: 'train', 'valid', or 'test' (default: valid). "
-             "Script will load from {data_dir}/{split}/_annotations.coco.json"
+        help="Direct path to validation data directory containing _annotations.coco.json (e.g., /workspace/data2/valid)"
     )
     parser.add_argument(
         "--num-samples",
@@ -941,7 +977,6 @@ if __name__ == "__main__":
     validate(
         config_path=args.config,
         weights_path=args.weights,
-        data_dir=args.data_dir,
-        split=args.split,
+        val_data_dir=args.val_data_dir,
         num_samples=args.num_samples
     )
