@@ -809,11 +809,14 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
         eval_mode=False
     )
 
+    # Load config for batch_size and other settings
     if use_base_model:
         # Use original SAM3 model without LoRA
         print("Using original SAM3 model (no LoRA)")
         stats = count_parameters(model)
         print(f"Total params: {stats['total_parameters']:,}")
+        # Use default batch_size for base model
+        batch_size = 1
     else:
         # Apply LoRA and load weights
         if config_path is None or weights_path is None:
@@ -846,6 +849,9 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
 
         stats = count_parameters(model)
         print(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
+
+        # Get batch_size from config
+        batch_size = config["training"]["batch_size"]
 
     model.to(device)
     model.eval()
@@ -907,7 +913,6 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
     def collate_fn(batch):
         return collate_fn_api(batch, dict_key="input", with_seg_masks=True)
 
-    batch_size = config["training"]["batch_size"]
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
