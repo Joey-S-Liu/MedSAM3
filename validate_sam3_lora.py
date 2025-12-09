@@ -768,28 +768,33 @@ def move_to_device(obj, device):
 
 
 def validate(config_path, weights_path, val_data_dir, num_samples=None,
-             prob_threshold=0.3, nms_iou=0.7, merge_cracks=False, merge_iou=0.15):
+             prob_threshold=0.3, nms_iou=0.7, merge_cracks=False, merge_iou=0.15,
+             use_base_model=False):
     """Run validation with full metrics (mAP, cgF1) and SAM3 NMS
 
     Args:
-        config_path: Path to config file (for LoRA settings only)
-        weights_path: Path to LoRA weights
+        config_path: Path to config file (for LoRA settings only). Not required if use_base_model=True.
+        weights_path: Path to LoRA weights. Not required if use_base_model=True.
         val_data_dir: Direct path to validation data directory containing _annotations.coco.json
                       (e.g., /workspace/data2/valid)
         num_samples: Optional limit for number of samples (for debugging)
+        use_base_model: If True, use original SAM3 model without LoRA (default: False)
 
-    Example:
+    Example (with LoRA):
         validate(
             config_path="configs/full_lora_config.yaml",
             weights_path="outputs/sam3_lora_full/best_lora_weights.pt",
             val_data_dir="/workspace/data2/valid"
         )
-        # This loads from /workspace/data2/valid/_annotations.coco.json
-    """
 
-    # Load config
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+    Example (base SAM3 model):
+        validate(
+            config_path=None,
+            weights_path=None,
+            val_data_dir="/workspace/data2/valid",
+            use_base_model=True
+        )
+    """
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -804,29 +809,43 @@ def validate(config_path, weights_path, val_data_dir, num_samples=None,
         eval_mode=False
     )
 
-    # Apply LoRA
-    print("Applying LoRA configuration...")
-    lora_cfg = config["lora"]
-    lora_config = LoRAConfig(
-        rank=lora_cfg["rank"],
-        alpha=lora_cfg["alpha"],
-        dropout=lora_cfg["dropout"],
-        target_modules=lora_cfg["target_modules"],
-        apply_to_vision_encoder=lora_cfg["apply_to_vision_encoder"],
-        apply_to_text_encoder=lora_cfg["apply_to_text_encoder"],
-        apply_to_geometry_encoder=lora_cfg["apply_to_geometry_encoder"],
-        apply_to_detr_encoder=lora_cfg["apply_to_detr_encoder"],
-        apply_to_detr_decoder=lora_cfg["apply_to_detr_decoder"],
-        apply_to_mask_decoder=lora_cfg["apply_to_mask_decoder"],
-    )
-    model = apply_lora_to_model(model, lora_config)
+    if use_base_model:
+        # Use original SAM3 model without LoRA
+        print("Using original SAM3 model (no LoRA)")
+        stats = count_parameters(model)
+        print(f"Total params: {stats['total_parameters']:,}")
+    else:
+        # Apply LoRA and load weights
+        if config_path is None or weights_path is None:
+            raise ValueError("config_path and weights_path are required when use_base_model=False")
 
-    # Load weights
-    print(f"\nLoading weights from {weights_path}...")
-    load_lora_weights(model, weights_path)
+        # Load config
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
 
-    stats = count_parameters(model)
-    print(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
+        # Apply LoRA
+        print("Applying LoRA configuration...")
+        lora_cfg = config["lora"]
+        lora_config = LoRAConfig(
+            rank=lora_cfg["rank"],
+            alpha=lora_cfg["alpha"],
+            dropout=lora_cfg["dropout"],
+            target_modules=lora_cfg["target_modules"],
+            apply_to_vision_encoder=lora_cfg["apply_to_vision_encoder"],
+            apply_to_text_encoder=lora_cfg["apply_to_text_encoder"],
+            apply_to_geometry_encoder=lora_cfg["apply_to_geometry_encoder"],
+            apply_to_detr_encoder=lora_cfg["apply_to_detr_encoder"],
+            apply_to_detr_decoder=lora_cfg["apply_to_detr_decoder"],
+            apply_to_mask_decoder=lora_cfg["apply_to_mask_decoder"],
+        )
+        model = apply_lora_to_model(model, lora_config)
+
+        # Load weights
+        print(f"\nLoading LoRA weights from {weights_path}...")
+        load_lora_weights(model, weights_path)
+
+        stats = count_parameters(model)
+        print(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
 
     model.to(device)
     model.eval()
@@ -1072,20 +1091,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        required=True,
-        help="Path to config file (for LoRA settings)"
+        default=None,
+        help="Path to config file (for LoRA settings). Not required if --use-base-model is set."
     )
     parser.add_argument(
         "--weights",
         type=str,
-        required=True,
-        help="Path to LoRA weights file"
+        default=None,
+        help="Path to LoRA weights file. Not required if --use-base-model is set."
     )
     parser.add_argument(
         "--val_data_dir",
         type=str,
         required=True,
         help="Direct path to validation data directory containing _annotations.coco.json (e.g., /workspace/data2/valid)"
+    )
+    parser.add_argument(
+        "--use-base-model",
+        action="store_true",
+        help="Use original SAM3 model without LoRA (for baseline comparison)"
     )
     parser.add_argument(
         "--num-samples",
@@ -1118,6 +1142,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Validate argument combinations
+    if not args.use_base_model:
+        if args.config is None or args.weights is None:
+            parser.error("--config and --weights are required when not using --use-base-model")
+
     validate(
         config_path=args.config,
         weights_path=args.weights,
@@ -1126,5 +1155,6 @@ if __name__ == "__main__":
         prob_threshold=args.prob_threshold,
         nms_iou=args.nms_iou,
         merge_cracks=args.merge,
-        merge_iou=args.merge_iou
+        merge_iou=args.merge_iou,
+        use_base_model=args.use_base_model
     )

@@ -371,7 +371,7 @@ This approach **significantly speeds up training** while still monitoring overfi
 After training completes, evaluate your model:
 
 ```bash
-# Basic validation (uses best model automatically)
+# Validate LoRA-adapted model (uses best model automatically)
 python3 validate_sam3_lora.py \
   --config configs/full_lora_config.yaml \
   --weights outputs/sam3_lora_full/best_lora_weights.pt \
@@ -382,6 +382,11 @@ python3 validate_sam3_lora.py \
   --config configs/full_lora_config.yaml \
   --weights outputs/sam3_lora_full/best_lora_weights.pt \
   --val_data_dir /workspace/data2/test
+
+# Baseline: Validate with original SAM3 model (no LoRA) for comparison
+python3 validate_sam3_lora.py \
+  --val_data_dir /workspace/data2/valid \
+  --use-base-model
 ```
 
 **Expected Output:**
@@ -486,6 +491,17 @@ python3 validate_sam3_lora.py \
   --nms-iou 0.8
 ```
 
+**4. Baseline Comparison (Original SAM3 Model):**
+```bash
+# Validate with original SAM3 model (no LoRA) for comparison
+python3 validate_sam3_lora.py \
+  --val_data_dir /workspace/data2/valid \
+  --use-base-model
+
+# This helps you understand the improvement from LoRA fine-tuning
+# Compare against your LoRA model results to see performance gains
+```
+
 ### Validation Parameters Reference
 
 | Parameter | Default | Description | When to Adjust |
@@ -494,6 +510,7 @@ python3 validate_sam3_lora.py \
 | `--nms-iou` | 0.7 | NMS IoU threshold | Lower for fewer duplicates (0.5), higher to keep overlaps (0.8) |
 | `--merge` | False | Enable segment merging | Use for crack-like or connected objects |
 | `--merge-iou` | 0.15 | IoU threshold for merging | Lower for aggressive merging (0.05), higher for conservative (0.25) |
+| `--use-base-model` | False | Use original SAM3 (no LoRA) | For baseline comparison |
 
 ### Interpreting Results
 
