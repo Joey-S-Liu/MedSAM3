@@ -20,6 +20,12 @@ Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)
 
 ### Recent Updates
 
+**2025-12-18**:
+- **Fixed grid-like bounding box pattern** in inference by adding NMS (Non-Maximum Suppression)
+- Added `--nms-iou` parameter to both `infer_sam.py` and `inference_lora.py`
+- Updated README with NMS documentation and troubleshooting guide
+- NMS removes overlapping detections for cleaner visualization output
+
 **2025-12-08**:
 - Added performance optimization recommendations based on SAM3 original approach
 - Created `light_lora_config.yaml` for memory-constrained environments
@@ -581,7 +587,7 @@ cgF1@50: 0.25 (low)
 
 ## Inference
 
-Run inference on new images using your trained LoRA model. The new `infer_sam.py` script is based on official SAM3 patterns and supports **multiple text prompts** for better accuracy.
+Run inference on new images using your trained LoRA model. The `infer_sam.py` script is based on official SAM3 patterns and supports **multiple text prompts** and **NMS filtering** for clean, non-overlapping detections.
 
 ### Command Line
 
@@ -622,6 +628,15 @@ python3 infer_sam.py \
   --threshold 0.3 \
   --output predictions.png
 
+# Adjust NMS to reduce overlapping boxes
+python3 infer_sam.py \
+  --config configs/full_lora_config.yaml \
+  --image path/to/image.jpg \
+  --prompt "seal" \
+  --threshold 0.3 \
+  --nms-iou 0.3 \
+  --output clean_detections.png
+
 # Mask-only visualization (no boxes)
 python3 infer_sam.py \
   --config configs/full_lora_config.yaml \
@@ -630,6 +645,28 @@ python3 infer_sam.py \
   --no-boxes \
   --output masks_only.png
 ```
+
+### NMS (Non-Maximum Suppression)
+
+NMS removes overlapping bounding boxes to produce clean visualizations. Without NMS, you may see a grid-like pattern of many overlapping boxes.
+
+```bash
+# Default NMS IoU = 0.5 (good for most cases)
+python3 infer_sam.py --config configs/full_lora_config.yaml --image test.jpg --prompt "object"
+
+# More aggressive NMS (fewer boxes, less overlap)
+python3 infer_sam.py --config configs/full_lora_config.yaml --image test.jpg --prompt "object" --nms-iou 0.3
+
+# Less aggressive NMS (keep more overlapping detections)
+python3 infer_sam.py --config configs/full_lora_config.yaml --image test.jpg --prompt "object" --nms-iou 0.7
+```
+
+**NMS IoU Guidelines:**
+| Value | Effect | Use Case |
+|-------|--------|----------|
+| 0.3 | Aggressive filtering | Single object per region, clean output |
+| 0.5 | Balanced (default) | Most general use cases |
+| 0.7 | Keep more boxes | Densely packed objects, overlapping instances |
 
 ### Text Prompts
 
@@ -668,6 +705,7 @@ Text prompts help guide the model to segment specific objects more accurately. *
 | `--prompt` | One or more text prompts | `"crack"` or `"crack" "defect"` | `"object"` |
 | `--output` | Output visualization path | `predictions.png` | `output.png` |
 | `--threshold` | Confidence threshold (0.0-1.0) | `0.3` | `0.5` |
+| `--nms-iou` | NMS IoU threshold (lower = fewer boxes) | `0.3` | `0.5` |
 | `--resolution` | Input resolution | `1008` | `1008` |
 | `--no-boxes` | Don't show bounding boxes | - | False |
 | `--no-masks` | Don't show segmentation masks | - | False |
@@ -677,11 +715,12 @@ Text prompts help guide the model to segment specific objects more accurately. *
 ```python
 from infer_sam import SAM3LoRAInference
 
-# Initialize inference engine
+# Initialize inference engine with NMS
 inferencer = SAM3LoRAInference(
     config_path="configs/full_lora_config.yaml",
     weights_path="outputs/sam3_lora_full/best_lora_weights.pt",
-    detection_threshold=0.5
+    detection_threshold=0.5,
+    nms_iou_threshold=0.5  # Adjust for cleaner output (lower = fewer boxes)
 )
 
 # Run prediction with single text prompt
@@ -704,7 +743,7 @@ inferencer.visualize(
     show_masks=True
 )
 
-# Access predictions for each prompt
+# Access predictions for each prompt (NMS already applied)
 for idx, prompt in enumerate(["crack", "defect"]):
     result = predictions[idx]
     print(f"Prompt '{result['prompt']}':")
@@ -1168,6 +1207,28 @@ FileNotFoundError: COCO annotation file not found: /path/to/data/train/_annotati
 - After training, run `validate_sam3_lora.py` for full metrics with NMS
 - This approach significantly speeds up training while still monitoring overfitting
 - Validation loss is sufficient to detect overfitting and select best model
+
+**10. Grid-Like Bounding Box Pattern in Inference**
+```
+Problem: Visualization shows many overlapping boxes forming a grid pattern
+```
+**Cause:** Missing NMS (Non-Maximum Suppression) filtering. SAM3 uses 100+ object queries that produce many overlapping predictions.
+
+**Solution:**
+```bash
+# Use lower NMS IoU threshold to remove overlapping boxes
+python3 infer_sam.py \
+  --config configs/full_lora_config.yaml \
+  --image test.jpg \
+  --prompt "object" \
+  --nms-iou 0.3 \
+  --output clean_output.png
+```
+
+**NMS IoU values:**
+- `0.3` - Aggressive filtering (fewer boxes, cleaner output)
+- `0.5` - Default, balanced
+- `0.7` - Keep more overlapping detections
 
 ### Performance Benchmarks
 

@@ -33,6 +33,7 @@ from PIL import Image as PILImage
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import yaml
+from torchvision.ops import nms
 
 # SAM3 imports
 from sam3.model_builder import build_sam3_image_model
@@ -65,6 +66,7 @@ class SAM3LoRAInference:
         weights_path: Optional[str] = None,
         resolution: int = 1008,
         detection_threshold: float = 0.5,
+        nms_iou_threshold: float = 0.5,
         device: str = "cuda"
     ):
         """
@@ -75,6 +77,7 @@ class SAM3LoRAInference:
             weights_path: Path to LoRA weights (optional, auto-detected from config)
             resolution: Input image resolution (default: 1008)
             detection_threshold: Confidence threshold for detections (default: 0.5)
+            nms_iou_threshold: IoU threshold for NMS (default: 0.5)
             device: Device to run on (default: "cuda")
         """
         # Load config
@@ -93,12 +96,14 @@ class SAM3LoRAInference:
         self.weights_path = weights_path
         self.resolution = resolution
         self.detection_threshold = detection_threshold
+        self.nms_iou_threshold = nms_iou_threshold
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
         print(f"🔧 Initializing SAM3 + LoRA...")
         print(f"   Device: {self.device}")
         print(f"   Resolution: {resolution}x{resolution}")
-        print(f"   Threshold: {detection_threshold}")
+        print(f"   Confidence threshold: {detection_threshold}")
+        print(f"   NMS IoU threshold: {nms_iou_threshold}")
 
         # Build base model
         print("\n📦 Building SAM3 model...")
@@ -269,6 +274,7 @@ class SAM3LoRAInference:
             if num_keep > 0:
                 # Get boxes and convert from cxcywh to xyxy
                 boxes_cxcywh = pred_boxes[0, keep]  # [num_keep, 4]
+                kept_scores = scores[keep]
                 cx, cy, w, h = boxes_cxcywh.unbind(-1)
 
                 # Convert to xyxy and scale to original image size
@@ -280,9 +286,16 @@ class SAM3LoRAInference:
 
                 boxes_xyxy = torch.stack([x1, y1, x2, y2], dim=-1)
 
+                # Apply NMS to remove overlapping boxes
+                keep_nms = nms(boxes_xyxy, kept_scores, self.nms_iou_threshold)
+                boxes_xyxy = boxes_xyxy[keep_nms]
+                kept_scores = kept_scores[keep_nms]
+                num_keep = len(keep_nms)
+
                 # Get masks and resize to original size
                 if pred_masks is not None:
-                    masks_small = pred_masks[0, keep].sigmoid() > 0.5  # [num_keep, H, W]
+                    # Apply NMS filtering to masks too
+                    masks_small = pred_masks[0, keep][keep_nms].sigmoid() > 0.5  # [num_keep_nms, H, W]
 
                     # Resize masks to original image size
                     import torch.nn.functional as F
@@ -300,11 +313,11 @@ class SAM3LoRAInference:
                 results[query_idx] = {
                     'prompt': prompt,
                     'boxes': boxes_xyxy.cpu().numpy(),
-                    'scores': scores[keep].cpu().numpy(),
+                    'scores': kept_scores.cpu().numpy(),
                     'masks': masks_np,
                     'num_detections': num_keep
                 }
-                print(f"   '{prompt}': {num_keep} detections (max score: {scores[keep].max().item():.3f})")
+                print(f"   '{prompt}': {num_keep} detections after NMS (max score: {kept_scores.max().item():.3f})")
             else:
                 results[query_idx] = {
                     'prompt': prompt,
@@ -482,6 +495,12 @@ def main():
         action="store_true",
         help="Don't show segmentation masks"
     )
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=0.5,
+        help="NMS IoU threshold (default: 0.5, lower = fewer overlapping boxes)"
+    )
 
     args = parser.parse_args()
 
@@ -490,7 +509,8 @@ def main():
         config_path=args.config,
         weights_path=args.weights,
         resolution=args.resolution,
-        detection_threshold=args.threshold
+        detection_threshold=args.threshold,
+        nms_iou_threshold=args.nms_iou
     )
 
     # Run inference

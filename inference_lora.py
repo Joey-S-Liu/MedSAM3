@@ -23,6 +23,7 @@ from PIL import Image as PILImage
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from torchvision.ops import nms
 
 # SAM3 Imports
 from sam3.model_builder import build_sam3_image_model
@@ -229,7 +230,7 @@ class SAM3LoRAInference:
             return obj
         return obj
 
-    def visualize_predictions(self, predictions, output_path, confidence_threshold=0.5, text_prompt=None):
+    def visualize_predictions(self, predictions, output_path, confidence_threshold=0.5, text_prompt=None, nms_iou_threshold=0.5):
         """
         Visualize predictions on the image.
 
@@ -238,18 +239,46 @@ class SAM3LoRAInference:
             output_path: Where to save the visualization
             confidence_threshold: Minimum confidence to show predictions
             text_prompt: Optional text prompt to display in title
+            nms_iou_threshold: IoU threshold for NMS (default: 0.5)
         """
         image = predictions['image']
         boxes = predictions['boxes']
         scores = predictions['scores']
         masks = predictions['masks']
+        orig_w, orig_h = predictions['original_size']
 
-        # Filter by confidence
-        valid_indices = np.where(scores.max(axis=1) > confidence_threshold)[0]
+        # Filter by confidence first
+        max_scores = scores.max(axis=1)
+        valid_mask = max_scores > confidence_threshold
+        valid_indices = np.where(valid_mask)[0]
 
         if len(valid_indices) == 0:
             print(f"⚠️ No predictions above confidence threshold {confidence_threshold}")
             return
+
+        # Apply NMS to remove overlapping boxes
+        # Convert boxes from cxcywh to xyxy for NMS
+        valid_boxes = boxes[valid_indices]  # [N, 4] in cxcywh normalized
+        valid_scores_flat = max_scores[valid_indices]
+
+        # Convert cxcywh to xyxy (still normalized)
+        cx, cy, w, h = valid_boxes[:, 0], valid_boxes[:, 1], valid_boxes[:, 2], valid_boxes[:, 3]
+        x1 = (cx - w / 2) * orig_w
+        y1 = (cy - h / 2) * orig_h
+        x2 = (cx + w / 2) * orig_w
+        y2 = (cy + h / 2) * orig_h
+        boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
+
+        # Apply NMS
+        boxes_tensor = torch.from_numpy(boxes_xyxy).float()
+        scores_tensor = torch.from_numpy(valid_scores_flat).float()
+        keep_nms = nms(boxes_tensor, scores_tensor, nms_iou_threshold)
+        keep_nms = keep_nms.numpy()
+
+        # Update valid_indices to only keep NMS survivors
+        valid_indices = valid_indices[keep_nms]
+
+        print(f"📦 NMS: {len(valid_mask.nonzero()[0])} → {len(valid_indices)} boxes (IoU threshold: {nms_iou_threshold})")
 
         # Create figure
         fig, ax = plt.subplots(1, figsize=(12, 8))
@@ -361,6 +390,12 @@ def main():
         default=0.5,
         help="Confidence threshold for showing predictions"
     )
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=0.5,
+        help="NMS IoU threshold (default: 0.5, lower = fewer boxes)"
+    )
 
     args = parser.parse_args()
 
@@ -392,8 +427,8 @@ def main():
     # Run prediction
     predictions = inferencer.predict(args.image, args.prompt)
 
-    # Visualize results
-    inferencer.visualize_predictions(predictions, args.output, args.threshold, text_prompt=args.prompt)
+    # Visualize results with NMS
+    inferencer.visualize_predictions(predictions, args.output, args.threshold, text_prompt=args.prompt, nms_iou_threshold=args.nms_iou)
 
     # Print summary
     print("\n📊 Prediction Summary:")
