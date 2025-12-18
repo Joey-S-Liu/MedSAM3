@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set
 import torch
 import torch.nn as nn
 
-from .lora_layer import LinearWithLoRA
+from .lora_layer import LinearWithLoRA, MultiheadAttentionLoRA
 
 
 class LoRAConfig:
@@ -36,23 +36,43 @@ class LoRAConfig:
         self.dropout = dropout
 
         # Default: apply to all attention projections and FFN layers
+        # Supports multiple naming conventions:
+        # - q_proj, k_proj, v_proj, out_proj: Standard separate projections
+        # - qkv: Fused Q/K/V projection (ViT-style, used in SAM3 vision backbone)
+        # - proj: Output projection in vision backbone
+        # - c_fc, c_proj: MLP layers in CLIP-style language backbone
+        # - linear1, linear2: FFN layers in transformer encoder/decoder
         if target_modules is None:
-            target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "linear1", "linear2"]
+            target_modules = [
+                # Standard attention projections
+                "q_proj", "k_proj", "v_proj", "out_proj",
+                # Vision backbone (ViT-style)
+                "qkv",  # Fused Q/K/V projection
+                "proj",  # Output projection in vision backbone (attn.proj)
+                "fc1", "fc2",  # MLP layers in vision backbone
+                # Language backbone (CLIP-style) MLP
+                "c_fc", "c_proj",
+                # Transformer FFN layers
+                "linear1", "linear2",
+            ]
 
         self.target_modules = set(target_modules)
 
         # If 'all' is specified, enable all possible modules
         if "all" in self.target_modules:
             self.target_modules = {
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "out_proj",
-                "linear1",
-                "linear2",
-                "in_proj",  # For MultiheadAttention
-                "cross_attn",
-                "self_attn",
+                # Standard attention projections
+                "q_proj", "k_proj", "v_proj", "out_proj",
+                # Vision backbone (ViT-style)
+                "qkv",  # Fused Q/K/V
+                "proj",  # Output projection
+                "fc1", "fc2",  # MLP layers
+                # Language backbone (CLIP-style)
+                "c_fc", "c_proj",
+                # Transformer FFN
+                "linear1", "linear2",
+                # MultiheadAttention internal (if accessible)
+                "in_proj",
             }
 
 
@@ -67,29 +87,48 @@ def _should_inject_lora(name: str, target_modules: Set[str]) -> bool:
     Returns:
         True if LoRA should be injected
     """
-    # Check for exact matches first
+    # Get the module basename (last part of the name)
+    module_basename = name.split(".")[-1]
+
+    # Direct basename match - most reliable method
+    if module_basename in target_modules:
+        return True
+
+    # Check for substring matches in basename
+    # This handles cases like "out_proj" matching "proj" target
     for target in target_modules:
-        if target in name:
+        if target in module_basename:
             return True
 
-    # Check for pattern matches (for encoder/decoder layers)
-    patterns = [
-        r".*\.self_attn\.",
-        r".*\.cross_attn\.",
-        r".*\.cross_attn_image\.",
-        r".*\.ca_text\.",
-        r".*\.linear[12]$",
-        r".*\.(q|k|v|out)_proj$",
-    ]
-
-    for pattern in patterns:
-        if re.match(pattern, name):
-            # Check if any target module is in the name
-            for target in target_modules:
-                if target in pattern:
+    # Check for substring matches in full name
+    # This handles patterns like "self_attn" appearing in the path
+    for target in target_modules:
+        if target in name:
+            # Make sure we're matching a meaningful component
+            # Avoid false positives by checking it's a component boundary
+            parts = name.split(".")
+            for part in parts:
+                if target == part or target in part:
                     return True
 
     return False
+
+
+def _is_inside_multihead_attention(model: nn.Module, module_name: str) -> bool:
+    """Check if the module is a direct child of nn.MultiheadAttention."""
+    parts = module_name.split('.')
+    if len(parts) < 2:
+        return False
+    # Get the parent module path
+    parent_path = '.'.join(parts[:-1])
+    # Find the parent module
+    parent = model
+    for p in parent_path.split('.'):
+        if hasattr(parent, p):
+            parent = getattr(parent, p)
+        else:
+            return False
+    return isinstance(parent, nn.MultiheadAttention)
 
 
 def inject_lora_into_model(
@@ -100,8 +139,9 @@ def inject_lora_into_model(
     """
     Inject LoRA layers into a SAM3 model.
 
-    This function walks through the model and replaces Linear layers that match
-    the target patterns with LinearWithLoRA layers.
+    This function:
+    1. Replaces nn.MultiheadAttention with MultiheadAttentionLoRA (enables LoRA on Q/K/V/out_proj)
+    2. Applies LoRA to all matching Linear layers
 
     Args:
         model: SAM3 model to inject LoRA into
@@ -111,10 +151,51 @@ def inject_lora_into_model(
     Returns:
         Modified model with LoRA injected
     """
+    # STEP 1: Replace nn.MultiheadAttention with MultiheadAttentionLoRA
+    # This enables LoRA to be applied to Q, K, V, and out_proj inside MHA
+    mha_to_replace = []
+    for name, module in model.named_modules():
+        if isinstance(module, nn.MultiheadAttention):
+            mha_to_replace.append((name, module))
+
+    mha_replaced_count = 0
+    for name, mha in mha_to_replace:
+        # Get parent module and attribute name
+        *parent_path, attr_name = name.split(".")
+        parent = model
+        for p in parent_path:
+            parent = getattr(parent, p)
+
+        # Create replacement with separate Q, K, V projections
+        new_mha = MultiheadAttentionLoRA(
+            embed_dim=mha.embed_dim,
+            num_heads=mha.num_heads,
+            dropout=mha.dropout,
+            bias=mha.in_proj_bias is not None,
+            batch_first=mha.batch_first,
+            in_proj_weight=mha.in_proj_weight,
+            in_proj_bias=mha.in_proj_bias,
+            out_proj_weight=mha.out_proj.weight,
+            out_proj_bias=mha.out_proj.bias if mha.out_proj.bias is not None else None,
+        )
+
+        setattr(parent, attr_name, new_mha)
+        mha_replaced_count += 1
+
+        if verbose:
+            print(f"Replaced MHA: {name}")
+
+    if verbose:
+        print(f"\nReplaced {mha_replaced_count} nn.MultiheadAttention with MultiheadAttentionLoRA")
+
+    # STEP 2: Freeze all parameters before applying LoRA
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # STEP 3: Apply LoRA to all matching Linear layers
     injected_count = 0
     total_lora_params = 0
 
-    # Walk through all named modules
     for name, module in model.named_modules():
         # Skip if not a Linear layer
         if not isinstance(module, nn.Linear):
