@@ -20,6 +20,12 @@ Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)
 
 ### Recent Updates
 
+**2026-01-04**:
+- **Added Multi-GPU training support** using DistributedDataParallel (DDP)
+- New `--device` argument for easy GPU selection: `--device 0 1 2 3`
+- Automatic torchrun launch when multiple GPUs specified
+- Linear scaling of effective batch size across GPUs
+
 **2025-12-18**:
 - **Fixed grid-like bounding box pattern** in inference by adding NMS (Non-Maximum Suppression)
 - Added `--nms-iou` parameter to both `infer_sam.py` and `inference_lora.py`
@@ -45,6 +51,7 @@ Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)
 - ✅ **Easy to Use**: YAML configs + simple CLI
 - ✅ **Production Ready**: Complete train + inference pipeline
 - ✅ **Real Applications**: Crack detection, defect inspection, and more
+- ✅ **Multi-GPU Support**: Scale training across multiple GPUs with `--device 0 1 2 3`
 
 ### What is LoRA?
 
@@ -296,8 +303,64 @@ python3 infer_sam.py \
 ### Basic Training
 
 ```bash
-# Use default configuration
+# Use default configuration (single GPU)
 python3 train_sam3_lora_native.py
+
+# Or specify custom config
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml
+```
+
+### Multi-GPU Training
+
+Train on multiple GPUs using the `--device` argument. The script automatically handles distributed training setup.
+
+```bash
+# Single GPU (default - GPU 0)
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml
+
+# Single GPU (specific GPU)
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 1
+
+# Multi-GPU (2 GPUs)
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 1
+
+# Multi-GPU (4 GPUs)
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 1 2 3
+
+# Multi-GPU (specific GPUs, e.g., 0, 2, 3)
+python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 2 3
+```
+
+**Multi-GPU Features:**
+- ✅ Automatic `torchrun` launch when multiple GPUs specified
+- ✅ DistributedDataParallel (DDP) for efficient gradient synchronization
+- ✅ DistributedSampler for proper data sharding
+- ✅ Synchronized validation loss across all GPUs
+- ✅ Model saving only on rank 0 (no file conflicts)
+
+**Effective Batch Size:**
+With multi-GPU, your effective batch size scales linearly:
+```
+effective_batch_size = batch_size × num_gpus
+```
+
+| Config batch_size | GPUs | Effective Batch Size |
+|-------------------|------|---------------------|
+| 4 | 1 | 4 |
+| 4 | 2 | 8 |
+| 4 | 4 | 16 |
+
+**Expected Output (Multi-GPU):**
+```
+Launching distributed training on GPUs: [0, 1]
+Number of processes: 2
+Multi-GPU training enabled with 2 GPUs
+Building SAM3 model...
+Applying LoRA...
+Trainable params: 11,796,480 (1.38%)
+Model wrapped with DistributedDataParallel
+Effective batch size: 4 x 2 = 8
+Starting training for 100 epochs...
 ```
 
 ### Custom Configuration
@@ -977,11 +1040,48 @@ output:
   output_dir: "outputs/production"
 EOF
 
-# Train
+# Train (single GPU)
 python3 train_sam3_lora_native.py --config configs/production.yaml
+
+# Train (multi-GPU - 2 GPUs)
+python3 train_sam3_lora_native.py --config configs/production.yaml --device 0 1
+
+# Train (multi-GPU - 4 GPUs)
+python3 train_sam3_lora_native.py --config configs/production.yaml --device 0 1 2 3
 ```
 
-### Example 3: Programmatic Training
+### Example 3: Multi-GPU Training
+
+```bash
+# Quick 2-GPU training
+python3 train_sam3_lora_native.py \
+  --config configs/full_lora_config.yaml \
+  --device 0 1
+
+# 4-GPU training for large datasets
+python3 train_sam3_lora_native.py \
+  --config configs/full_lora_config.yaml \
+  --device 0 1 2 3
+
+# Use specific GPUs (e.g., skip GPU 1)
+python3 train_sam3_lora_native.py \
+  --config configs/full_lora_config.yaml \
+  --device 0 2 3
+
+# With custom master port (if default 29500 is in use)
+python3 train_sam3_lora_native.py \
+  --config configs/full_lora_config.yaml \
+  --device 0 1 \
+  --master_port 29501
+```
+
+**Tips for Multi-GPU Training:**
+- Effective batch size = `batch_size × num_gpus`
+- Learning rate can be scaled: `lr × num_gpus` (optional, try both)
+- Memory per GPU stays the same as single-GPU
+- Training time scales roughly linearly with GPU count
+
+### Example 4: Programmatic Training
 
 ```python
 from train_sam3_lora_native import SAM3TrainerNative
@@ -995,7 +1095,7 @@ trainer.train()
 # Weights saved to: outputs/sam3_lora_full/lora_weights.pt
 ```
 
-### Example 4: Batch Inference with Text Prompts
+### Example 5: Batch Inference with Text Prompts
 
 ```python
 from infer_sam import SAM3LoRAInference

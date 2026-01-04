@@ -9,6 +9,16 @@ Validation Strategy (Following SAM3):
 
 This approach significantly speeds up training by avoiding expensive metric computation
 during each epoch, while still monitoring overfitting via validation loss.
+
+Multi-GPU Training:
+  Single GPU:
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml
+
+  Multi-GPU (DDP):
+    torchrun --nproc_per_node=2 train_sam3_lora_native.py --config configs/full_lora_config.yaml --multi-gpu
+
+  Multi-GPU with specific GPUs:
+    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_sam3_lora_native.py --config configs/full_lora_config.yaml --multi-gpu
 """
 
 import os
@@ -18,12 +28,17 @@ import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from tqdm import tqdm
 from pathlib import Path
 import numpy as np
 from PIL import Image as PILImage
 import contextlib
+
+# Distributed training imports
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # SAM3 Imports
 from sam3.model_builder import build_sam3_image_model
@@ -42,6 +57,55 @@ from sam3.train.masks_ops import rle_encode  # For encoding masks to RLE format
 
 # Note: Evaluation modules (mAP, cgF1, NMS) are in validate_sam3_lora.py
 # Training only computes validation loss, following SAM3's approach
+
+
+# ============================================================================
+# Distributed Training Utilities
+# ============================================================================
+
+def setup_distributed():
+    """Initialize distributed training environment."""
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+
+    return local_rank
+
+
+def cleanup_distributed():
+    """Clean up distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process():
+    """Check if this is the main process (rank 0)."""
+    if not dist.is_initialized():
+        return True
+    return dist.get_rank() == 0
+
+
+def get_world_size():
+    """Get the number of processes."""
+    if not dist.is_initialized():
+        return 1
+    return dist.get_world_size()
+
+
+def get_rank():
+    """Get the rank of current process."""
+    if not dist.is_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def print_rank0(*args, **kwargs):
+    """Print only on rank 0."""
+    if is_main_process():
+        print(*args, **kwargs)
+
 
 class COCOSegmentDataset(Dataset):
     """Dataset class for COCO format segmentation data"""
@@ -694,24 +758,35 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
 
 
 class SAM3TrainerNative:
-    def __init__(self, config_path):
+    def __init__(self, config_path, multi_gpu=False):
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
-            
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
+        # Multi-GPU setup
+        self.multi_gpu = multi_gpu
+        self.local_rank = 0
+        self.world_size = 1
+
+        if self.multi_gpu:
+            self.local_rank = setup_distributed()
+            self.world_size = get_world_size()
+            self.device = torch.device(f"cuda:{self.local_rank}")
+            print_rank0(f"Multi-GPU training enabled with {self.world_size} GPUs")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         # Build Model
-        print("Building SAM3 model...")
+        print_rank0("Building SAM3 model...")
         self.model = build_sam3_image_model(
             device=self.device.type,
             compile=False,
-            load_from_HF=True, # Tries to download from HF if checkpoint_path is None
+            load_from_HF=True,  # Tries to download from HF if checkpoint_path is None
             bpe_path="sam3/assets/bpe_simple_vocab_16e6.txt.gz",
             eval_mode=False
         )
-        
+
         # Apply LoRA
-        print("Applying LoRA...")
+        print_rank0("Applying LoRA...")
         lora_cfg = self.config["lora"]
         lora_config = LoRAConfig(
             rank=lora_cfg["rank"],
@@ -726,11 +801,21 @@ class SAM3TrainerNative:
             apply_to_mask_decoder=lora_cfg["apply_to_mask_decoder"],
         )
         self.model = apply_lora_to_model(self.model, lora_config)
-        
+
         stats = count_parameters(self.model)
-        print(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
-        
+        print_rank0(f"Trainable params: {stats['trainable_parameters']:,} ({stats['trainable_percentage']:.2f}%)")
+
         self.model.to(self.device)
+
+        # Wrap model with DDP if multi-GPU
+        if self.multi_gpu:
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                find_unused_parameters=True  # Required for LoRA since not all params are used
+            )
+            print_rank0(f"Model wrapped with DistributedDataParallel")
         
         # Optimizer
         self.optimizer = AdamW(
@@ -797,7 +882,7 @@ class SAM3TrainerNative:
         data_dir = self.config["training"]["data_dir"]
 
         # Load datasets using COCO format
-        print(f"\nLoading training data from {data_dir}...")
+        print_rank0(f"\nLoading training data from {data_dir}...")
         train_ds = COCOSegmentDataset(data_dir=data_dir, split="train")
 
         # Check if validation data exists
@@ -805,16 +890,16 @@ class SAM3TrainerNative:
         val_ds = None
 
         try:
-            print(f"\nLoading validation data from {data_dir}...")
+            print_rank0(f"\nLoading validation data from {data_dir}...")
             val_ds = COCOSegmentDataset(data_dir=data_dir, split="valid")
             if len(val_ds) > 0:
                 has_validation = True
-                print(f"Found validation data: {len(val_ds)} images")
+                print_rank0(f"Found validation data: {len(val_ds)} images")
             else:
-                print(f"Validation dataset is empty.")
+                print_rank0(f"Validation dataset is empty.")
                 val_ds = None
         except Exception as e:
-            print(f"Could not load validation data: {e}")
+            print_rank0(f"Could not load validation data: {e}")
             val_ds = None
 
         if not has_validation:
@@ -823,12 +908,33 @@ class SAM3TrainerNative:
         def collate_fn(batch):
             return collate_fn_api(batch, dict_key="input", with_seg_masks=True)
 
+        # Create samplers for distributed training
+        train_sampler = None
+        val_sampler = None
+
+        if self.multi_gpu:
+            train_sampler = DistributedSampler(
+                train_ds,
+                num_replicas=self.world_size,
+                rank=get_rank(),
+                shuffle=True
+            )
+            if has_validation:
+                val_sampler = DistributedSampler(
+                    val_ds,
+                    num_replicas=self.world_size,
+                    rank=get_rank(),
+                    shuffle=False
+                )
+
         train_loader = DataLoader(
             train_ds,
             batch_size=self.config["training"]["batch_size"],
-            shuffle=True,
+            shuffle=(train_sampler is None),  # Only shuffle if not using sampler
+            sampler=train_sampler,
             collate_fn=collate_fn,
-            num_workers=0 # Simplified
+            num_workers=self.config["training"].get("num_workers", 0),
+            pin_memory=True
         )
 
         if has_validation:
@@ -836,8 +942,10 @@ class SAM3TrainerNative:
                 val_ds,
                 batch_size=self.config["training"]["batch_size"],
                 shuffle=False,
+                sampler=val_sampler,
                 collate_fn=collate_fn,
-                num_workers=0
+                num_workers=self.config["training"].get("num_workers", 0),
+                pin_memory=True
             )
         else:
             val_loader = None
@@ -855,13 +963,16 @@ class SAM3TrainerNative:
 
         epochs = self.config["training"]["num_epochs"]
         best_val_loss = float('inf')
-        print(f"Starting training for {epochs} epochs...")
+        print_rank0(f"Starting training for {epochs} epochs...")
 
         if has_validation:
-            print(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
+            print_rank0(f"Training samples: {len(train_ds)}, Validation samples: {len(val_ds)}")
         else:
-            print(f"Training samples: {len(train_ds)}")
-            print("⚠️  No validation data found - training without validation")
+            print_rank0(f"Training samples: {len(train_ds)}")
+            print_rank0("⚠️  No validation data found - training without validation")
+
+        if self.multi_gpu:
+            print_rank0(f"Effective batch size: {self.config['training']['batch_size']} x {self.world_size} = {self.config['training']['batch_size'] * self.world_size}")
 
         # Helper to move BatchedDatapoint to device
         def move_to_device(obj, device):
@@ -885,10 +996,15 @@ class SAM3TrainerNative:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         for epoch in range(epochs):
+            # Set epoch for distributed sampler (required for proper shuffling)
+            if self.multi_gpu and train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+
             # Track training losses for this epoch
             train_losses = []
 
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}")
+            # Only show progress bar on rank 0
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}", disable=not is_main_process())
             for batch_dict in pbar:
                 input_batch = batch_dict["input"]
 
@@ -951,7 +1067,7 @@ class SAM3TrainerNative:
                 val_losses = []
 
                 with torch.no_grad():
-                    val_pbar = tqdm(val_loader, desc=f"Validation")
+                    val_pbar = tqdm(val_loader, desc=f"Validation", disable=not is_main_process())
 
                     for batch_dict in val_pbar:
                         input_batch = batch_dict["input"]
@@ -989,75 +1105,187 @@ class SAM3TrainerNative:
                         val_pbar.set_postfix({"val_loss": total_loss.item()})
 
                 avg_val_loss = sum(val_losses) / len(val_losses)
-                print(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
 
-                # Save models based on validation loss
-                save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
+                # Synchronize val_loss across all processes for consistent best model selection
+                if self.multi_gpu:
+                    val_loss_tensor = torch.tensor([avg_val_loss], device=self.device)
+                    dist.all_reduce(val_loss_tensor, op=dist.ReduceOp.AVG)
+                    avg_val_loss = val_loss_tensor.item()
 
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    save_lora_weights(self.model, str(out_dir / "best_lora_weights.pt"))
-                    print(f"✓ New best model saved (val_loss: {avg_val_loss:.6f})")
+                print_rank0(f"\nEpoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
 
-                # Log to file
-                with open(out_dir / "val_stats.json", "a") as f:
-                    f.write(json.dumps({
-                        "epoch": epoch + 1,
-                        "train_loss": avg_train_loss,
-                        "val_loss": avg_val_loss
-                    }) + "\n")
+                # Save models based on validation loss (only on rank 0)
+                if is_main_process():
+                    # Get underlying model from DDP wrapper
+                    model_to_save = self.model.module if self.multi_gpu else self.model
+                    save_lora_weights(model_to_save, str(out_dir / "last_lora_weights.pt"))
+
+                    if avg_val_loss < best_val_loss:
+                        best_val_loss = avg_val_loss
+                        save_lora_weights(model_to_save, str(out_dir / "best_lora_weights.pt"))
+                        print(f"✓ New best model saved (val_loss: {avg_val_loss:.6f})")
+
+                    # Log to file
+                    with open(out_dir / "val_stats.json", "a") as f:
+                        f.write(json.dumps({
+                            "epoch": epoch + 1,
+                            "train_loss": avg_train_loss,
+                            "val_loss": avg_val_loss
+                        }) + "\n")
 
                 torch.cuda.empty_cache()
 
                 # Back to training mode
                 self.model.train()
             else:
-                # No validation - just save model each epoch
-                save_lora_weights(self.model, str(out_dir / "last_lora_weights.pt"))
+                # No validation - just save model each epoch (only on rank 0)
+                if is_main_process():
+                    model_to_save = self.model.module if self.multi_gpu else self.model
+                    save_lora_weights(model_to_save, str(out_dir / "last_lora_weights.pt"))
 
-        # Final save
+        # Synchronize before final save
+        if self.multi_gpu:
+            dist.barrier()
 
-        if has_validation:
-            print(f"\n{'='*80}")
-            print(f"✅ Training complete!")
-            print(f"{'='*80}")
-            print(f"Best validation loss: {best_val_loss:.6f}")
-            print(f"\nModels saved to {out_dir}:")
-            print(f"  - best_lora_weights.pt (best validation loss)")
-            print(f"  - last_lora_weights.pt (last epoch)")
-            print(f"\n📊 To compute full metrics (mAP, cgF1) with NMS:")
-            print(f"   python validate_sam3_lora.py \\")
-            print(f"     --config {args.config} \\")
-            print(f"     --weights {out_dir}/best_lora_weights.pt \\")
-            print(f"     --data_dir /workspace/data2 \\")
-            print(f"     --split valid")
-            print(f"{'='*80}")
-        else:
-            # If no validation, copy last to best
-            import shutil
-            last_path = out_dir / "last_lora_weights.pt"
-            best_path = out_dir / "best_lora_weights.pt"
-            if last_path.exists():
-                shutil.copy(last_path, best_path)
+        # Final save (only on rank 0)
+        if is_main_process():
+            if has_validation:
+                print(f"\n{'='*80}")
+                print(f"✅ Training complete!")
+                print(f"{'='*80}")
+                print(f"Best validation loss: {best_val_loss:.6f}")
+                print(f"\nModels saved to {out_dir}:")
+                print(f"  - best_lora_weights.pt (best validation loss)")
+                print(f"  - last_lora_weights.pt (last epoch)")
+                print(f"\n📊 To compute full metrics (mAP, cgF1) with NMS:")
+                print(f"   python validate_sam3_lora.py \\")
+                print(f"     --config <config_path> \\")
+                print(f"     --weights {out_dir}/best_lora_weights.pt \\")
+                print(f"     --val_data_dir <data_dir>/valid")
+                print(f"{'='*80}")
+            else:
+                # If no validation, copy last to best
+                import shutil
+                last_path = out_dir / "last_lora_weights.pt"
+                best_path = out_dir / "best_lora_weights.pt"
+                if last_path.exists():
+                    shutil.copy(last_path, best_path)
 
-            print(f"\n{'='*80}")
-            print(f"✅ Training complete!")
-            print(f"{'='*80}")
-            print(f"\nModels saved to {out_dir}:")
-            print(f"  - best_lora_weights.pt (copy of last epoch)")
-            print(f"  - last_lora_weights.pt (last epoch)")
-            print(f"\nℹ️  No validation data - consider adding data/valid/ for better model selection")
-            print(f"{'='*80}")
+                print(f"\n{'='*80}")
+                print(f"✅ Training complete!")
+                print(f"{'='*80}")
+                print(f"\nModels saved to {out_dir}:")
+                print(f"  - best_lora_weights.pt (copy of last epoch)")
+                print(f"  - last_lora_weights.pt (last epoch)")
+                print(f"\nℹ️  No validation data - consider adding data/valid/ for better model selection")
+                print(f"{'='*80}")
+
+        # Cleanup distributed training
+        if self.multi_gpu:
+            cleanup_distributed()
+
+def launch_distributed_training(args):
+    """Launch training with multiple GPUs using torchrun subprocess."""
+    import subprocess
+    import sys
+
+    devices = args.device
+    num_gpus = len(devices)
+    device_str = ",".join(map(str, devices))
+
+    print(f"Launching distributed training on GPUs: {devices}")
+    print(f"Number of processes: {num_gpus}")
+
+    # Build the command
+    cmd = [
+        sys.executable, "-m", "torch.distributed.run",
+        f"--nproc_per_node={num_gpus}",
+        "--master_port", str(args.master_port),
+        sys.argv[0],  # This script
+        "--config", args.config,
+        "--device", *map(str, devices),
+        "--_launched_by_torchrun"  # Internal flag to indicate we're in subprocess
+    ]
+
+    # Set environment variable for visible devices
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = device_str
+
+    # Run the subprocess
+    result = subprocess.run(cmd, env=env)
+    sys.exit(result.returncode)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train SAM3 with LoRA")
+    parser = argparse.ArgumentParser(
+        description="Train SAM3 with LoRA",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Single GPU (default GPU 0):
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml
+
+  Single GPU (specific GPU):
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 1
+
+  Multi-GPU (GPUs 0 and 1):
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 1
+
+  Multi-GPU (GPUs 0, 2, 3):
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 2 3
+
+  Multi-GPU (all 4 GPUs):
+    python train_sam3_lora_native.py --config configs/full_lora_config.yaml --device 0 1 2 3
+        """
+    )
     parser.add_argument(
         "--config",
         type=str,
         default="configs/full_lora_config.yaml",
         help="Path to YAML configuration file"
     )
+    parser.add_argument(
+        "--device",
+        type=int,
+        nargs="+",
+        default=[0],
+        help="GPU device ID(s) to use. Single value for single GPU, multiple values for multi-GPU. "
+             "Example: --device 0 (single GPU), --device 0 1 2 (3 GPUs)"
+    )
+    parser.add_argument(
+        "--master_port",
+        type=int,
+        default=29500,
+        help="Master port for distributed training (default: 29500)"
+    )
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="Local rank for distributed training (set automatically by torchrun)"
+    )
+    parser.add_argument(
+        "--_launched_by_torchrun",
+        action="store_true",
+        help=argparse.SUPPRESS  # Hidden argument for internal use
+    )
     args = parser.parse_args()
 
-    trainer = SAM3TrainerNative(args.config)
-    trainer.train()
+    # Determine if multi-GPU training is requested
+    num_devices = len(args.device)
+    is_torchrun_subprocess = args._launched_by_torchrun or "LOCAL_RANK" in os.environ
+
+    if num_devices > 1 and not is_torchrun_subprocess:
+        # Multi-GPU requested but not yet in torchrun - launch it
+        launch_distributed_training(args)
+    else:
+        # Single GPU or already in torchrun subprocess
+        multi_gpu = num_devices > 1 and is_torchrun_subprocess
+
+        if not multi_gpu and num_devices == 1:
+            # Single GPU mode - set the device
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device[0])
+            print(f"Using single GPU: {args.device[0]}")
+
+        trainer = SAM3TrainerNative(args.config, multi_gpu=multi_gpu)
+        trainer.train()
