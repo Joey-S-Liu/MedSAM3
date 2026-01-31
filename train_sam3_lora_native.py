@@ -192,18 +192,19 @@ class COCOSegmentDataset(Dataset):
             class_name = self.categories.get(category_id, "object")
             object_class_names.append(class_name)
 
-            # Convert from COCO [x, y, w, h] to [x1, y1, x2, y2]
+            # Convert from COCO [x, y, w, h] to normalized [cx, cy, w, h] (CxCyWH)
+            # SAM3 internally expects boxes in CxCyWH format normalized to [0, 1]
             x, y, w, h = bbox_coco
-            box_tensor = torch.tensor([x, y, x + w, y + h], dtype=torch.float32)
+            cx = x + w / 2.0
+            cy = y + h / 2.0
 
-            # Scale box to resolution
-            box_tensor[0] *= scale_w
-            box_tensor[2] *= scale_w
-            box_tensor[1] *= scale_h
-            box_tensor[3] *= scale_h
-
-            # IMPORTANT: Normalize boxes to [0, 1] range (required by SAM3 loss functions)
-            box_tensor /= self.resolution
+            # Scale to resolution and normalize to [0, 1]
+            box_tensor = torch.tensor([
+                cx * scale_w / self.resolution,
+                cy * scale_h / self.resolution,
+                w * scale_w / self.resolution,
+                h * scale_h / self.resolution,
+            ], dtype=torch.float32)
 
             # Handle segmentation mask (polygon or RLE format)
             segment = None
@@ -241,7 +242,7 @@ class COCOSegmentDataset(Dataset):
 
             obj = Object(
                 bbox=box_tensor,
-                area=(box_tensor[2]-box_tensor[0])*(box_tensor[3]-box_tensor[1]),
+                area=(box_tensor[2] * box_tensor[3]).item(),
                 object_id=i,
                 segment=segment
             )
@@ -497,10 +498,9 @@ def create_coco_gt_from_dataset(dataset, image_ids=None, mask_resolution=288):
 
         # Add annotations
         for obj in datapoint.images[0].objects:
-            # Convert normalized box to pixel coordinates at mask_resolution
-            box = obj.bbox * mask_resolution
-            x1, y1, x2, y2 = box.tolist()
-            x, y, w, h = x1, y1, x2-x1, y2-y1
+            # Convert normalized CxCyWH box to COCO [x, y, w, h] at mask_resolution
+            cx, cy, bw, bh = (obj.bbox * mask_resolution).tolist()
+            x, y, w, h = cx - bw / 2, cy - bh / 2, bw, bh
 
             ann = {
                 'id': ann_id,
@@ -704,20 +704,12 @@ def create_coco_gt_from_dataset_original_res(dataset, image_ids=None, debug=Fals
         })
 
         for obj in datapoint.images[0].objects:
-            # Scale boxes from normalized [0,1] to original size
-            box = obj.bbox  # Already in [0,1] normalized coordinates
-            x1, y1, x2, y2 = box.tolist()
-
-            # Convert to original image coordinates
-            x1_orig = x1 * orig_w
-            y1_orig = y1 * orig_h
-            x2_orig = x2 * orig_w
-            y2_orig = y2 * orig_h
-
-            # Convert to COCO format [x, y, w, h]
-            x, y = x1_orig, y1_orig
-            w = x2_orig - x1_orig
-            h = y2_orig - y1_orig
+            # Convert normalized CxCyWH box to COCO [x, y, w, h] at original size
+            cx, cy, bw, bh = obj.bbox.tolist()
+            w = bw * orig_w
+            h = bh * orig_h
+            x = cx * orig_w - w / 2
+            y = cy * orig_h - h / 2
 
             ann = {
                 'id': ann_id,
