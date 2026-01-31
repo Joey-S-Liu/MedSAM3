@@ -31,22 +31,6 @@ Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)
 - Automatic torchrun launch when multiple GPUs specified
 - Linear scaling of effective batch size across GPUs
 
-**2025-12-18**:
-- **Fixed grid-like bounding box pattern** in inference by adding NMS (Non-Maximum Suppression)
-- Added `--nms-iou` parameter to both `infer_sam.py` and `inference_lora.py`
-- Updated README with NMS documentation and troubleshooting guide
-- NMS removes overlapping detections for cleaner visualization output
-
-**2025-12-08**:
-- Added performance optimization recommendations based on SAM3 original approach
-- Created `light_lora_config.yaml` for memory-constrained environments
-- Updated training config with better hyperparameters for small datasets
-- Added troubleshooting section for common training issues
-
-**2025-12-07**:
-- Fixed missing `rle_encode` import in `train_sam3_lora_native.py`
-- Verified category-aware text prompts work correctly in both training and validation
-- All mask processing operations now working properly without errors
 
 ### Why Use This?
 
