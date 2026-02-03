@@ -20,6 +20,12 @@ Fine-tune the SAM3 (Segment Anything Model 3) using **LoRA (Low-Rank Adaptation)
 
 ### Recent Updates
 
+**2026-02-03**:
+- **Fixed multi-class category assignment bug** in training/validation
+- Previously, images with multiple categories incorrectly assigned all objects to the mode (most frequent) category
+- Now creates separate queries per category, mapping each object to its actual class
+- Affected files: `train_sam3_lora_native.py`, `train_sam3_lora_with_categories.py`, `validate_sam3_lora.py`
+
 **2026-01-31**:
 - **Replaced `--no-boxes` with `--boundingbox` option** in `infer_sam.py`
 - New `--boundingbox True/False` flag for explicit bounding box control (default: False)
