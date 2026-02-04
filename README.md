@@ -12,15 +12,7 @@
 
 <small><sup>*</sup> Equal Contribution &nbsp;&nbsp; <sup>†</sup> Corresponding Author</small>
 
-[**[Paper]**](https://arxiv.org/abs/2511.19046
-        
-        
-        
-        
-        
-        
-        
-        ) | [[Weights]**](PLACEHOLDER_WEIGHTS_LINK)
+[📄 **Paper (arXiv)**](https://arxiv.org/abs/2511.19046) &nbsp;|&nbsp; [💾 **Download Weights**](PLACEHOLDER_WEIGHTS_LINK)
 
 </div>
 
