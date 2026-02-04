@@ -17,7 +17,7 @@
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffd21e)](https://huggingface.co/lal-Joey/MedSAM3)
 
 </div>
-
+**We will continuously update the documentation and examples to optimize this repository.**
 ---
 
 ## 📖 Introduction
