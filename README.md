@@ -12,7 +12,9 @@
 
 <small><sup>*</sup> Equal Contribution &nbsp;&nbsp; <sup>†</sup> Corresponding Author</small>
 
-[📄 **Paper (arXiv)**](https://arxiv.org/abs/2511.19046) &nbsp;|&nbsp; [💾 **Download Weights**](PLACEHOLDER_WEIGHTS_LINK)
+[![arXiv](https://img.shields.io/badge/arXiv-2511.19046-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2511.19046)
+&nbsp;
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffd21e)](https://huggingface.co/lal-Joey/MedSAM3)
 
 </div>
 
@@ -42,7 +44,7 @@ We are releasing our first version (**v1**) of the LoRA weights.
 
 | Model Version | Base Model | Method | Link |
 | :--- | :--- | :--- | :--- |
-| **MedSAM3-v1** | SAM3 | LoRA Fine-tuning | [**Download LoRA Weights**](PLACEHOLDER_LORA_LINK) |
+| **MedSAM3-v1** | SAM3 | LoRA Fine-tuning | [**Download LoRA Weights**](https://huggingface.co/lal-Joey/MedSAM3) |
 
 ## 🔗 References
 
