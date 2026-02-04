@@ -14,7 +14,7 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2511.19046-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2511.19046)
 &nbsp;
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffd21e)](https://huggingface.co/lal-Joey/MedSAM3)
+[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-ffd21e)](https://huggingface.co/lal-Joey/MedSAM3_v1)
 
 </div>
 **We will continuously update the documentation and examples to optimize this repository.**
@@ -45,7 +45,7 @@ We are releasing our first version (**v1**) of the LoRA weights.
 
 | Model Version | Base Model | Method | Link |
 | :--- | :--- | :--- | :--- |
-| **MedSAM3-v1** | SAM3 | LoRA Fine-tuning | [**Download LoRA Weights**](https://huggingface.co/lal-Joey/MedSAM3) |
+| **MedSAM3-v1** | SAM3 | LoRA Fine-tuning | [**Download LoRA Weights**](https://huggingface.co/lal-Joey/MedSAM3_v1) |
 
 ## 🔗 References
 
