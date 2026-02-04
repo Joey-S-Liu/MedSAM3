@@ -87,7 +87,7 @@ python3 train_sam3_lora_native.py --config configs/full_lora_config.yaml
 
 ## ⚠️ Notes & Precautions
 
-1. **Hyperparameter Tuning:** Please flexibly adjust the `threshold` and `nms-iou` parameters according to the specific task type. Different modalities or segmentation targets may require different sensitivity settings.
+1. **Hyperparameter Tuning:** Please flexibly adjust the `threshold` and `nms-iou` parameters according to the specific task type. Different modalities or segmentation targets may require different sensitivity settings (e.g., some tasks achieve optimal results with `threshold=0.8`, while others work best with `threshold=0.5`). We recommend using the visualization outputs from `infer_sam.py` to determine the best settings for your specific task.
 2. **Configuration:** Please specify the path to your LoRA weights in the `configs/full_lora_config.yaml` file under the `output_dir` field.
 3. **Data Format:** The training data follows the **COCO format**, which is consistent with the standard SAM3 implementation.
 4. **Supported Tasks (v1):** The specific list of task categories supported by the current v1 version will be released within a few days. We encourage users to experiment with specific tasks and provide feedback.
