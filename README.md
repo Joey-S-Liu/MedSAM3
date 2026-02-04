@@ -46,7 +46,7 @@ We are releasing our first version (**v1**) of the LoRA weights.
 
 ## 🔗 References
 
-This project is built upon the following excellent open-source projects. Please refer to them for the base environment setup:
+This project is built upon the following excellent open-source projects. Please refer to them for the base environment setup. If you encounter code-related issues, please also refer to the specific instructions and documentation provided by these works:
 
 * **SAM3:** [https://github.com/facebookresearch/sam3](https://github.com/facebookresearch/sam3)
 * **SAM3_LoRA:** [https://github.com/Sompote/SAM3_LoRA](https://github.com/Sompote/SAM3_LoRA)
