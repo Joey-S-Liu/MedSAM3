@@ -23,7 +23,7 @@
 
 ## 📖 Introduction
 
-**MedSAM3** is a pure text-guided (concept-guided) medical image segmentation model. Unlike traditional models that rely on bounding boxes or points, MedSAM3 leverages specific medical concepts to segment targets across a wide range of modalities.
+**MedSAM3-v1** is a pure text-guided (concept-guided) medical image segmentation model. Unlike traditional models that rely on bounding boxes or points, MedSAM3 leverages specific medical concepts to segment targets across a wide range of modalities.
 
 ### 🌟 Key Features & Dataset Statistics
 
