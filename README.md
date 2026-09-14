@@ -2,13 +2,12 @@
 
 <div align="center">
 
-**Anglin Liu**<sup>1,*</sup>, **Rundong Xue**<sup>2,*</sup>, **Xu R. Cao**<sup>3,†</sup>, **Yifan Shen**<sup>3</sup>, **Yi Lu**<sup>1</sup>, **Xiang Li**<sup>3</sup>, **Qianqian Chen**<sup>4</sup>, **Jintai Chen**<sup>1,5,†</sup>
+**Anglin Liu**<sup>1,*</sup>, **Xu R. Cao**<sup>2,†</sup>, **Yifan Shen**<sup>2</sup>, **Yi Lu**<sup>1</sup>, **Xiang Li**<sup>2</sup>, **Qianqian Chen**<sup>3</sup>, **Jintai Chen**<sup>1,4,†</sup>
 
-<sup>1</sup> The Hong Kong University of Science and Technology (Guangzhou)  
-<sup>2</sup> Xi’an Jiaotong University  
-<sup>3</sup> University of Illinois Urbana-Champaign  
-<sup>4</sup> Southeast University  
-<sup>5</sup> The Hong Kong University of Science and Technology  
+<sup>1</sup> The Hong Kong University of Science and Technology (Guangzhou)   
+<sup>2</sup> University of Illinois Urbana-Champaign  
+<sup>3</sup> Southeast University  
+<sup>4</sup> The Hong Kong University of Science and Technology  
 
 <small><sup>*</sup> Equal Contribution &nbsp;&nbsp; <sup>†</sup> Corresponding Author</small>
 
@@ -109,7 +108,7 @@ If you find this project useful for your research, please consider citing:
 ```bibtex
 @misc{liu2025medsam3delvingsegmentmedical,
       title={MedSAM3: Delving into Segment Anything with Medical Concepts}, 
-      author={Anglin Liu and Rundong Xue and Xu R. Cao and Yifan Shen and Yi Lu and Xiang Li and Qianqian Chen and Jintai Chen},
+      author={Anglin Liu and Xu R. Cao and Yifan Shen and Yi Lu and Xiang Li and Qianqian Chen and Jintai Chen},
       year={2025},
       eprint={2511.19046},
       archivePrefix={arXiv},
