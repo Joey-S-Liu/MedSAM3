@@ -2,14 +2,14 @@
 
 <div align="center">
 
-**Anglin Liu**<sup>1,*</sup>, **Xu R. Cao**<sup>2,†</sup>, **Yifan Shen**<sup>2</sup>, **Yi Lu**<sup>1</sup>, **Xiang Li**<sup>2</sup>, **Qianqian Chen**<sup>3</sup>, **Jintai Chen**<sup>1,4,†</sup>
+**Anglin Liu**<sup>1</sup>, **Xu R. Cao**<sup>2,†</sup>, **Yifan Shen**<sup>2</sup>, **Yi Lu**<sup>1</sup>, **Xiang Li**<sup>2</sup>, **Qianqian Chen**<sup>3</sup>, **Jintai Chen**<sup>1,4,†</sup>
 
 <sup>1</sup> The Hong Kong University of Science and Technology (Guangzhou)   
 <sup>2</sup> University of Illinois Urbana-Champaign  
 <sup>3</sup> Southeast University  
 <sup>4</sup> The Hong Kong University of Science and Technology  
 
-<small><sup>*</sup> Equal Contribution &nbsp;&nbsp; <sup>†</sup> Corresponding Author</small>
+<sup>†</sup> Corresponding Author</small>
 
 [![arXiv](https://img.shields.io/badge/arXiv-2511.19046-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2511.19046)
 &nbsp;
