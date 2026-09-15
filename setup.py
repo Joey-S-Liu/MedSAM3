@@ -17,6 +17,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/sam3_lora",
     packages=find_packages(),
+    py_modules=["lora_layers"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
